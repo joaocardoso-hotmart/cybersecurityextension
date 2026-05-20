@@ -11,6 +11,8 @@ const CLAUDE_FILES = {
 	rules: ['secrets-exposure.md', 'injection.md', 'xss.md', 'auth.md'],
 };
 
+const AMAZONQ_FILES = ['secrets-exposure.md', 'injection.md', 'xss.md', 'auth.md'];
+
 const KIRO_FILES = ['secrets-exposure.md', 'injection.md', 'xss.md', 'auth.md'];
 
 const CURSOR_FILES = ['secrets-exposure.mdc', 'injection.mdc', 'xss.mdc', 'auth.mdc'];
@@ -19,6 +21,7 @@ const IDE_TARGETS: Record<string, string> = {
 	kiro: '.kiro/steering',
 	cursor: '.cursor/rules',
 	vscode: '.vscode/steering',
+	amazonq: '.amazonq/rules',
 };
 
 export function activate(context: vscode.ExtensionContext) {
@@ -177,6 +180,7 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 			{ label: 'Cursor', description: '.cursor/rules/', id: 'cursor', picked: true },
 			{ label: 'VS Code', description: '.vscode/steering/', id: 'vscode', picked: true },
 			{ label: 'Claude', description: 'CLAUDE.md + .claude/rules/', id: 'claude', picked: true },
+			{ label: 'Amazon Q', description: '.amazonq/rules/', id: 'amazonq', picked: true },
 		],
 		{
 			canPickMany: true,
@@ -284,6 +288,9 @@ async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFold
 	// Apply VS Code files (uses same as Kiro)
 	applied += await applyIdeFiles(context, workspaceFolder, 'vscode', silent);
 
+	// Apply Amazon Q files
+	applied += await applyIdeFiles(context, workspaceFolder, 'amazonq', silent);
+
 	// Apply Claude files
 	applied += await applyClaudeFiles(context, workspaceFolder, silent);
 
@@ -317,6 +324,10 @@ async function applyIdeFiles(
 			// VS Code uses same files as Kiro
 			sourceDir = path.join(context.extensionPath, 'standards', 'kiro', 'steering');
 			files = KIRO_FILES;
+			break;
+		case 'amazonq':
+			sourceDir = path.join(context.extensionPath, 'standards', 'amazonq');
+			files = AMAZONQ_FILES;
 			break;
 		default:
 			return 0;
