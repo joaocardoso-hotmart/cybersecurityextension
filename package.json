@@ -1,0 +1,73 @@
+{
+  "name": "cybersecurityextension",
+  "displayName": "Hotmart Cybersecurity",
+  "description": "Distribui e aplica padrões de segurança corporativos para AI IDEs (Kiro, Cursor, VS Code)",
+  "version": "0.0.2",
+  "publisher": "HotmartCybersecurity",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joaocardoso-hotmart/cybersecurityextension.git"
+  },
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other",
+    "Linters"
+  ],
+  "keywords": [
+    "security",
+    "appsec",
+    "cybersecurity",
+    "hotmart",
+    "steering",
+    "secure-by-default"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cybersecurityextension.bootstrap",
+        "title": "Cybersecurity: Bootstrap Project"
+      },
+      {
+        "command": "cybersecurityextension.updateStandards",
+        "title": "Cybersecurity: Update Standards"
+      },
+      {
+        "command": "cybersecurityextension.showGuidelines",
+        "title": "Cybersecurity: Show Guidelines"
+      }
+    ],
+    "configuration": {
+      "title": "Hotmart Cybersecurity",
+      "properties": {
+        "hotmartCybersecurity.autoApplyOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Perguntar automaticamente se deseja aplicar padrões de segurança ao abrir um projeto sem eles."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "lint": "eslint",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.13.0",
+    "@stylistic/eslint-plugin": "2.9.0",
+    "@types/node": "22.10.2",
+    "@types/vscode": "1.100.0",
+    "eslint": "^9.39.4",
+    "typescript": "5.8.2",
+    "typescript-eslint": "8.26.0"
+  }
+}
