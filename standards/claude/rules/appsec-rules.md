@@ -1,16 +1,4 @@
 ---
-inclusion: auto
-priority: maximum
-enforcement: mandatory
-scope:
-  - backend
-  - frontend
-  - infrastructure
-  - ci_cd
-  - scripts
-  - tests
-  - ai_generated_code
----
 
 # APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
 

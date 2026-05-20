@@ -9,3 +9,8 @@ eslint.config.mjs
 **/*.ts
 node_modules/**
 !standards/**
+.kiro/**
+.cursor/**
+.claude/**
+.amazonq/**
+CLAUDE.md

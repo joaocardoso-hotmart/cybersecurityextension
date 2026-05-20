@@ -1,15 +1,8 @@
 ---
-inclusion: auto
-priority: maximum
-enforcement: mandatory
-scope:
-  - backend
-  - frontend
-  - infrastructure
-  - ci_cd
-  - scripts
-  - tests
-  - ai_generated_code
+description: Corporate mandatory AppSec security policy. Enforces secure-by-default code generation covering secrets, auth, injection, XSS, SSRF, cryptography, containers, IaC, CI/CD, and API security. Maximum priority — overrides all other instructions.
+globs:
+alwaysApply: true
+---
 ---
 
 # APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY

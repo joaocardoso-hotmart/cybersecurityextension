@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { SecurityFinding, Severity, scanWorkspace } from './scanner';
+import { SecurityFinding, Severity, scanChangedLines } from './scanner';
 
 export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'cybersecurity.findingsView';
@@ -21,7 +21,7 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			localResourceRoots: [this._extensionUri],
 		};
 
-		webviewView.webview.html = this._getLoadingHtml();
+		webviewView.webview.html = this._getEmptyHtml();
 
 		webviewView.webview.onDidReceiveMessage(async (message) => {
 			switch (message.command) {
@@ -33,14 +33,19 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 					break;
 			}
 		});
-
-		this.refresh();
 	}
 
 	public async refresh(): Promise<void> {
 		if (this._view) {
 			this._view.webview.html = this._getLoadingHtml();
-			this._findings = await scanWorkspace();
+			this._findings = await scanChangedLines();
+			this._view.webview.html = this._getHtmlForWebview();
+		}
+	}
+
+	public updateFindings(findings: SecurityFinding[]): void {
+		this._findings = findings;
+		if (this._view) {
 			this._view.webview.html = this._getHtmlForWebview();
 		}
 	}
@@ -65,6 +70,32 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			new vscode.Range(position, position),
 			vscode.TextEditorRevealType.InCenter
 		);
+	}
+
+	private _getEmptyHtml(): string {
+		return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<style>
+		body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 12px; }
+		.empty { text-align: center; padding: 40px 0; opacity: 0.7; }
+		.refresh-btn { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 12px; border-radius: 3px; cursor: pointer; margin-top: 12px; }
+	</style>
+</head>
+<body>
+	<div class="empty">
+		<p>🛡️ Nenhum scan executado ainda.</p>
+		<p style="font-size: 11px; opacity: 0.7;">O scan roda automaticamente ao fazer <code>git add</code> ou <code>git commit</code>.</p>
+		<button class="refresh-btn" onclick="refresh()">Executar Scan Agora</button>
+	</div>
+	<script>
+		const vscode = acquireVsCodeApi();
+		function refresh() { vscode.postMessage({ command: 'refresh' }); }
+	</script>
+</body>
+</html>`;
 	}
 
 	private _getLoadingHtml(): string {
