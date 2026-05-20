@@ -13,6 +13,9 @@
   "engines": {
     "vscode": "^1.100.0"
   },
+  "extensionDependencies": [
+    "vscode.git"
+  ],
   "categories": [
     "Other",
     "Linters"
@@ -30,6 +33,24 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cybersecurity-sidebar",
+          "title": "Hotmart Cybersecurity",
+          "icon": "media/shield.svg"
+        }
+      ]
+    },
+    "views": {
+      "cybersecurity-sidebar": [
+        {
+          "type": "webview",
+          "id": "cybersecurity.findingsView",
+          "name": "Security Findings"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "cybersecurityextension.bootstrap",
@@ -42,15 +63,29 @@
       {
         "command": "cybersecurityextension.showGuidelines",
         "title": "Cybersecurity: Show Guidelines"
+      },
+      {
+        "command": "cybersecurityextension.refreshScan",
+        "title": "Cybersecurity: Refresh Security Scan",
+        "icon": "$(refresh)"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "cybersecurityextension.refreshScan",
+          "when": "view == cybersecurity.findingsView",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Hotmart Cybersecurity",
       "properties": {
         "hotmartCybersecurity.autoApplyOnOpen": {
           "type": "boolean",
           "default": true,
-          "description": "Perguntar automaticamente se deseja aplicar padrões de segurança ao abrir um projeto sem eles."
+          "description": "Aplicar automaticamente padrões de segurança ao abrir um projeto."
         }
       }
     }
