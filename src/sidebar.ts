@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { SecurityFinding, Severity, scanWorkspace } from './scanner';
+import { SecurityFinding, Severity, scanChangedLines } from './scanner';
 
 export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'cybersecurity.findingsView';
@@ -21,7 +21,7 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			localResourceRoots: [this._extensionUri],
 		};
 
-		webviewView.webview.html = this._getLoadingHtml();
+		webviewView.webview.html = this._getEmptyHtml();
 
 		webviewView.webview.onDidReceiveMessage(async (message) => {
 			switch (message.command) {
@@ -31,16 +31,40 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 				case 'refresh':
 					await this.refresh();
 					break;
+				case 'fixWithAI':
+					await vscode.commands.executeCommand('cybersecurityextension.applyFixWithAI', JSON.stringify({
+						file: message.file,
+						line: message.line,
+						title: message.title,
+						cwe: message.cwe,
+						description: message.description,
+						suggestion: message.suggestion,
+						suggestedFix: null,
+						snippet: message.snippet,
+					}));
+					break;
+				case 'dismiss':
+					await vscode.commands.executeCommand('cybersecurityextension.dismissFinding', JSON.stringify({
+						id: message.id,
+						file: message.file,
+						line: message.line,
+					}));
+					break;
 			}
 		});
-
-		this.refresh();
 	}
 
 	public async refresh(): Promise<void> {
 		if (this._view) {
 			this._view.webview.html = this._getLoadingHtml();
-			this._findings = await scanWorkspace();
+			this._findings = await scanChangedLines();
+			this._view.webview.html = this._getHtmlForWebview();
+		}
+	}
+
+	public updateFindings(findings: SecurityFinding[]): void {
+		this._findings = findings;
+		if (this._view) {
 			this._view.webview.html = this._getHtmlForWebview();
 		}
 	}
@@ -65,6 +89,33 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			new vscode.Range(position, position),
 			vscode.TextEditorRevealType.InCenter
 		);
+	}
+
+	private _getEmptyHtml(): string {
+		return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<style>
+		body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 12px; }
+		.empty { text-align: center; padding: 40px 0; opacity: 0.7; }
+		.scan-btn { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; margin-top: 12px; font-size: 12px; }
+		.scan-btn:hover { opacity: 0.9; }
+	</style>
+</head>
+<body>
+	<div class="empty">
+		<p>🛡️ Tudo limpo por aqui.</p>
+		<p style="font-size: 11px; opacity: 0.7;">Os findings aparecerão aqui quando você fizer <code>git add</code> ou <code>git commit</code>.</p>
+		<button class="scan-btn" onclick="refresh()">⟳ Scan Manual</button>
+	</div>
+	<script>
+		const vscode = acquireVsCodeApi();
+		function refresh() { vscode.postMessage({ command: 'refresh' }); }
+	</script>
+</body>
+</html>`;
 	}
 
 	private _getLoadingHtml(): string {
@@ -238,6 +289,31 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			font-weight: 600;
 			margin-bottom: 2px;
 		}
+		.finding-actions {
+			display: flex;
+			gap: 8px;
+			margin-top: 10px;
+		}
+		.action-btn {
+			border: none;
+			padding: 4px 10px;
+			border-radius: 3px;
+			cursor: pointer;
+			font-size: 11px;
+			font-weight: 500;
+		}
+		.fix-btn {
+			background: var(--vscode-button-background);
+			color: var(--vscode-button-foreground);
+		}
+		.fix-btn:hover { opacity: 0.85; }
+		.dismiss-btn {
+			background: transparent;
+			border: 1px solid var(--vscode-foreground);
+			color: var(--vscode-foreground);
+			opacity: 0.7;
+		}
+		.dismiss-btn:hover { opacity: 1; }
 		.empty {
 			text-align: center;
 			padding: 40px 0;
@@ -280,6 +356,14 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 		function refresh() {
 			vscode.postMessage({ command: 'refresh' });
 		}
+
+		function fixWithAI(file, line, title, cwe, description, suggestion, snippet) {
+			vscode.postMessage({ command: 'fixWithAI', file, line, title, cwe, description, suggestion, snippet });
+		}
+
+		function dismiss(id, file, line) {
+			vscode.postMessage({ command: 'dismiss', id, file, line });
+		}
 	</script>
 </body>
 </html>`;
@@ -307,6 +391,10 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			<div class="finding-suggestion">
 				<div class="suggestion-label">💡 Correção sugerida:</div>
 				${escapedSuggestion}
+			</div>
+			<div class="finding-actions">
+				<button class="action-btn fix-btn" onclick="fixWithAI('${this._escapeJs(finding.file)}', ${finding.line}, '${this._escapeJs(finding.title)}', '${this._escapeJs(finding.cwe)}', '${this._escapeJs(finding.description)}', '${this._escapeJs(finding.suggestion)}', '${this._escapeJs(finding.snippet)}')">📋 Copiar prompt de correção</button>
+				<button class="action-btn dismiss-btn" onclick="dismiss('${this._escapeJs(finding.id)}', '${this._escapeJs(finding.file)}', ${finding.line})">✕ Falso Positivo</button>
 			</div>
 		</div>
 	</details>

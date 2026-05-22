@@ -2,7 +2,7 @@
   "name": "cybersecurityextension",
   "displayName": "Hotmart Cybersecurity",
   "description": "Distribui e aplica padrões de segurança corporativos para AI IDEs (Kiro, Cursor, VS Code)",
-  "version": "0.0.2",
+  "version": "0.2.0",
   "publisher": "HotmartCybersecurity",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -65,20 +65,14 @@
         "title": "Cybersecurity: Show Guidelines"
       },
       {
-        "command": "cybersecurityextension.refreshScan",
-        "title": "Cybersecurity: Refresh Security Scan",
-        "icon": "$(refresh)"
+        "command": "cybersecurityextension.applyFixWithAI",
+        "title": "Cybersecurity: Apply Fix with AI"
+      },
+      {
+        "command": "cybersecurityextension.dismissFinding",
+        "title": "Cybersecurity: Dismiss Finding"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "cybersecurityextension.refreshScan",
-          "when": "view == cybersecurity.findingsView",
-          "group": "navigation"
-        }
-      ]
-    },
     "configuration": {
       "title": "Hotmart Cybersecurity",
       "properties": {

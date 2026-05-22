@@ -2,27 +2,48 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SecuritySidebarProvider } from './sidebar';
-import { scanWorkspace, SecurityFinding } from './scanner';
-
-const STEERING_FILES = ['appsec-rules.md', 'executive.md'];
+import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
+import { ensureOpenGrep } from './semgrep';
 
 const CLAUDE_FILES = {
-	root: ['CLAUDE.md'],
-	rules: ['secrets-exposure.md', 'injection.md', 'xss.md', 'auth.md'],
+	rules: ['appsec-rules.md'],
 };
 
-const KIRO_FILES = ['secrets-exposure.md', 'injection.md', 'xss.md', 'auth.md'];
+const KIRO_FILES = ['appsec-rules.md'];
+const CURSOR_FILES = ['appsec-rules.mdc'];
+const VSCODE_FILES = ['appsec-rules.md'];
 
-const CURSOR_FILES = ['secrets-exposure.mdc', 'injection.mdc', 'xss.mdc', 'auth.mdc'];
+const GITHUB_WORKFLOW_FILES = ['appsec-guard.yml'];
 
-const IDE_TARGETS: Record<string, string> = {
-	kiro: '.kiro/steering',
-	cursor: '.cursor/rules',
-	vscode: '.vscode/steering',
+const IDE_CONFIGS: Record<string, { targetDir: string; sourceDir: string; files: string[] }> = {
+	kiro: { targetDir: '.kiro/steering', sourceDir: 'standards/kiro/steering', files: KIRO_FILES },
+	cursor: { targetDir: '.cursor/rules', sourceDir: 'standards/cursor/rules', files: CURSOR_FILES },
+	vscode: { targetDir: '.github', sourceDir: 'standards/steering', files: ['copilot-instructions.md'] },
 };
+
+/**
+ * Detects which IDE is running based on vscode.env.uriScheme.
+ */
+function detectIDE(): string {
+	const scheme = vscode.env.uriScheme;
+	if (scheme === 'kiro') { return 'kiro'; }
+	if (scheme === 'cursor') { return 'cursor'; }
+	return 'vscode';
+}
+
+// Diagnostics collection for security findings
+let diagnosticCollection: vscode.DiagnosticCollection;
+let currentFindings: SecurityFinding[] = [];
 
 export function activate(context: vscode.ExtensionContext) {
 	console.log('Hotmart Cybersecurity Extension activated');
+
+	// Set extension path for scanner to find rules
+	setExtensionPath(context.extensionPath);
+
+	// Create diagnostics collection for inline underlines
+	diagnosticCollection = vscode.languages.createDiagnosticCollection('cybersecurity');
+	context.subscriptions.push(diagnosticCollection);
 
 	// Register sidebar webview provider
 	const sidebarProvider = new SecuritySidebarProvider(context.extensionUri);
@@ -33,6 +54,7 @@ export function activate(context: vscode.ExtensionContext) {
 		)
 	);
 
+	// Register commands
 	const bootstrapCmd = vscode.commands.registerCommand(
 		'cybersecurityextension.bootstrap',
 		() => bootstrapProject(context)
@@ -48,87 +70,404 @@ export function activate(context: vscode.ExtensionContext) {
 		() => showGuidelines(context)
 	);
 
-	const refreshScanCmd = vscode.commands.registerCommand(
-		'cybersecurityextension.refreshScan',
-		() => sidebarProvider.refresh()
+	context.subscriptions.push(bootstrapCmd, updateCmd, showGuidelinesCmd);
+
+	// Command to apply fix via AI prompt
+	const applyFixCmd = vscode.commands.registerCommand(
+		'cybersecurityextension.applyFixWithAI',
+		(...args: unknown[]) => applyFixWithAI(args[0])
+	);
+	context.subscriptions.push(applyFixCmd);
+
+	// Command to dismiss a finding as false positive
+	const dismissCmd = vscode.commands.registerCommand(
+		'cybersecurityextension.dismissFinding',
+		(...args: unknown[]) => dismissFinding(args[0], sidebarProvider)
+	);
+	context.subscriptions.push(dismissCmd);
+
+	// Register hover provider for security findings
+	context.subscriptions.push(
+		vscode.languages.registerHoverProvider('*', new SecurityHoverProvider())
 	);
 
-	context.subscriptions.push(bootstrapCmd, updateCmd, showGuidelinesCmd, refreshScanCmd);
-
-	// Re-scan when files are saved
+	// Register code action provider for quick fixes
 	context.subscriptions.push(
-		vscode.workspace.onDidSaveTextDocument(() => {
-			sidebarProvider.refresh();
+		vscode.languages.registerCodeActionsProvider('*', new SecurityCodeActionProvider(), {
+			providedCodeActionKinds: [vscode.CodeActionKind.QuickFix],
 		})
 	);
 
-	// Pre-commit security guard
-	registerPreCommitGuard(context, sidebarProvider);
+	// Watch for git operations (commit / staging)
+	registerGitWatcher(context, sidebarProvider);
 
-	// Auto-apply on workspace open if not already present
+	// Ensure OpenGrep is installed
+	ensureOpenGrep();
+
+	// Auto-apply steering files on workspace open
 	autoApplyIfNeeded(context);
 }
 
-function registerPreCommitGuard(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
-	// Listen for git commit via the VS Code Git extension API
-	const gitExtension = vscode.extensions.getExtension('vscode.git');
-	if (!gitExtension) {
+// ─── SECURITY SCAN (only changed lines) ───────────────────────────────────────
+
+async function runSecurityScan(sidebarProvider: SecuritySidebarProvider): Promise<SecurityFinding[]> {
+	const findings = await scanChangedLines();
+	currentFindings = findings;
+
+	// Update diagnostics (red underlines)
+	updateDiagnostics(findings);
+
+	// Update sidebar
+	sidebarProvider.updateFindings(findings);
+
+	return findings;
+}
+
+function updateDiagnostics(findings: SecurityFinding[]): void {
+	diagnosticCollection.clear();
+
+	const workspaceFolders = vscode.workspace.workspaceFolders;
+	if (!workspaceFolders) {
 		return;
 	}
 
-	const activateGitExtension = async () => {
-		const git = gitExtension.isActive ? gitExtension.exports : await gitExtension.activate();
-		const api = git.getAPI(1);
+	// Group findings by file
+	const findingsByFile = new Map<string, SecurityFinding[]>();
+	for (const finding of findings) {
+		if (!findingsByFile.has(finding.file)) {
+			findingsByFile.set(finding.file, []);
+		}
+		findingsByFile.get(finding.file)!.push(finding);
+	}
 
-		if (!api) {
-			return;
+	// Create diagnostics per file
+	for (const [filePath, fileFindings] of findingsByFile) {
+		const fullPath = path.join(workspaceFolders[0].uri.fsPath, filePath);
+		const uri = vscode.Uri.file(fullPath);
+		const diagnostics: vscode.Diagnostic[] = [];
+
+		for (const finding of fileFindings) {
+			const range = new vscode.Range(
+				finding.line - 1, finding.column - 1,
+				finding.line - 1, finding.endColumn - 1
+			);
+
+			const severity = mapSeverity(finding.severity);
+			const diagnostic = new vscode.Diagnostic(range, finding.title, severity);
+			diagnostic.code = finding.cwe;
+			diagnostic.source = 'Hotmart AppSec';
+			diagnostic.relatedInformation = [
+				new vscode.DiagnosticRelatedInformation(
+					new vscode.Location(uri, range),
+					finding.suggestion
+				),
+			];
+
+			diagnostics.push(diagnostic);
 		}
 
-		// Register a post-commit command that warns — but the real magic is the pre-commit hook
-		// We intercept via onDidChangeState or by wrapping the commit command
-		context.subscriptions.push(
-			api.onDidOpenRepository((repo: { onDidCommit: (cb: () => void) => vscode.Disposable }) => {
-				// For each repo, we can't block commit via API, so we use a file watcher on .git/COMMIT_EDITMSG
-				watchForCommitAttempt(context, sidebarProvider);
-			})
-		);
-
-		// Also watch immediately for existing repos
-		if (api.repositories.length > 0) {
-			watchForCommitAttempt(context, sidebarProvider);
-		}
-	};
-
-	activateGitExtension();
+		diagnosticCollection.set(uri, diagnostics);
+	}
 }
 
-function watchForCommitAttempt(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
+function mapSeverity(severity: Severity): vscode.DiagnosticSeverity {
+	switch (severity) {
+		case 'critical':
+		case 'high':
+			return vscode.DiagnosticSeverity.Error;
+		case 'medium':
+			return vscode.DiagnosticSeverity.Warning;
+		case 'low':
+		case 'info':
+			return vscode.DiagnosticSeverity.Information;
+	}
+}
+
+// ─── HOVER PROVIDER ───────────────────────────────────────────────────────────
+
+class SecurityHoverProvider implements vscode.HoverProvider {
+	provideHover(document: vscode.TextDocument, position: vscode.Position): vscode.Hover | undefined {
+		const filePath = vscode.workspace.asRelativePath(document.uri);
+		const lineNum = position.line + 1;
+
+		const finding = currentFindings.find(f =>
+			f.file === filePath &&
+			f.line === lineNum &&
+			position.character >= f.column - 1 &&
+			position.character <= f.endColumn - 1
+		);
+
+		if (!finding) {
+			return undefined;
+		}
+
+		const markdown = new vscode.MarkdownString();
+		markdown.isTrusted = true;
+		markdown.supportHtml = true;
+
+		const severityBadge = getSeverityBadge(finding.severity);
+		const escapedSnippet = escapeHtml(finding.snippet);
+		const escapedSuggestion = escapeHtml(finding.suggestion);
+
+		// Build the command link for the copy prompt button
+		const encodedFinding = encodeURIComponent(JSON.stringify({
+			file: finding.file,
+			line: finding.line,
+			title: finding.title,
+			cwe: finding.cwe,
+			description: finding.description,
+			suggestion: finding.suggestion,
+			suggestedFix: finding.suggestedFix || null,
+			snippet: finding.snippet,
+		}));
+		const copyButton = `[$(clippy) Copiar prompt de correção](command:cybersecurityextension.applyFixWithAI?${encodedFinding} "Copia o prompt para colar no chat da IA")`;
+		const dismissButton = `[$(close) Falso Positivo](command:cybersecurityextension.dismissFinding?${encodeURIComponent(JSON.stringify({ id: finding.id, file: finding.file, line: finding.line }))} "Ignorar este finding")`;
+
+		// Premium hover design using HTML
+		markdown.appendMarkdown(`<span style="color:#e6edf3;">**🛡️ ${escapeHtml(finding.title)}**</span>&nbsp;&nbsp;`);
+		markdown.appendMarkdown(`<span style="color:${severityBadge.color};font-size:0.85em;">●</span> `);
+		markdown.appendMarkdown(`<span style="color:${severityBadge.color};font-size:0.85em;font-weight:600;">${finding.severity.toUpperCase()}</span>&nbsp;&nbsp;`);
+		markdown.appendMarkdown(`<span style="color:#6e7681;font-size:0.85em;">${finding.cwe}</span>\n\n`);
+
+		// Description
+		markdown.appendMarkdown(`<span style="color:#9da7b3;">${escapeHtml(finding.description)}</span>\n\n`);
+
+		// Vulnerable code
+		markdown.appendMarkdown(`---\n\n`);
+		markdown.appendMarkdown(`<span style="color:#6e7681;font-size:0.85em;">⚠️ CÓDIGO VULNERÁVEL</span>\n\n`);
+		markdown.appendCodeblock(finding.snippet, document.languageId);
+
+		// Fix section
+		markdown.appendMarkdown(`\n<span style="color:#6e7681;font-size:0.85em;">💡 CORREÇÃO</span>\n\n`);
+		markdown.appendMarkdown(`<span style="color:#e6edf3;">${escapedSuggestion}</span>\n\n`);
+
+		if (finding.suggestedFix) {
+			markdown.appendCodeblock(finding.suggestedFix, document.languageId);
+		}
+
+		// Action buttons (always visible at bottom)
+		markdown.appendMarkdown(`\n---\n\n${copyButton} &nbsp;&nbsp; ${dismissButton}\n`);
+
+		return new vscode.Hover(markdown, new vscode.Range(
+			finding.line - 1, finding.column - 1,
+			finding.line - 1, finding.endColumn - 1
+		));
+	}
+}
+
+function getSeverityBadge(severity: Severity): { color: string; label: string } {
+	switch (severity) {
+		case 'critical': return { color: '#f85149', label: 'CRITICAL' };
+		case 'high': return { color: '#db6d28', label: 'HIGH' };
+		case 'medium': return { color: '#d29922', label: 'MEDIUM' };
+		case 'low': return { color: '#3fb950', label: 'LOW' };
+		case 'info': return { color: '#58a6ff', label: 'INFO' };
+	}
+}
+
+function escapeHtml(text: string): string {
+	return text
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;');
+}
+
+// ─── CODE ACTION PROVIDER (Quick Fix) ────────────────────────────────────────
+
+class SecurityCodeActionProvider implements vscode.CodeActionProvider {
+	provideCodeActions(
+		document: vscode.TextDocument,
+		range: vscode.Range | vscode.Selection,
+	): vscode.CodeAction[] | undefined {
+		const filePath = vscode.workspace.asRelativePath(document.uri);
+		const actions: vscode.CodeAction[] = [];
+
+		for (const finding of currentFindings) {
+			if (finding.file !== filePath) {
+				continue;
+			}
+			if (finding.line - 1 < range.start.line || finding.line - 1 > range.end.line) {
+				continue;
+			}
+
+			// Always offer the AI-assisted fix action
+			const aiAction = new vscode.CodeAction(
+				`🛡️ Copiar prompt: ${finding.title}`,
+				vscode.CodeActionKind.QuickFix
+			);
+			aiAction.command = {
+				command: 'cybersecurityextension.applyFixWithAI',
+				title: 'Aplicar correção via IA',
+				arguments: [JSON.stringify({
+					file: finding.file,
+					line: finding.line,
+					title: finding.title,
+					cwe: finding.cwe,
+					description: finding.description,
+					suggestion: finding.suggestion,
+					suggestedFix: finding.suggestedFix || null,
+					snippet: finding.snippet,
+				})],
+			};
+			aiAction.isPreferred = true;
+			aiAction.diagnostics = diagnosticCollection.get(document.uri)?.filter(
+				d => d.range.start.line === finding.line - 1
+			) as vscode.Diagnostic[] | undefined;
+
+			actions.push(aiAction);
+		}
+
+		return actions;
+	}
+}
+
+// ─── APPLY FIX WITH AI PROMPT ─────────────────────────────────────────────────
+
+async function applyFixWithAI(findingArg: unknown): Promise<void> {
+	let finding: {
+		file: string;
+		line: number;
+		title: string;
+		cwe: string;
+		description: string;
+		suggestion: string;
+		suggestedFix: string | null;
+		snippet: string;
+	};
+
+	try {
+		if (typeof findingArg === 'string') {
+			finding = JSON.parse(findingArg);
+		} else if (typeof findingArg === 'object' && findingArg !== null) {
+			// When called from hover command link, VS Code may pass it as parsed object
+			finding = findingArg as typeof finding;
+		} else {
+			throw new Error('Invalid argument type');
+		}
+	} catch (err) {
+		// Try URL-decoded version
+		try {
+			const decoded = decodeURIComponent(String(findingArg));
+			finding = JSON.parse(decoded);
+		} catch {
+			vscode.window.showErrorMessage('Erro ao processar finding de segurança.');
+			console.error('applyFixWithAI error:', err, 'arg:', findingArg);
+			return;
+		}
+	}
+
+	// Build the AI prompt
+	const prompt = buildFixPrompt(finding);
+
+	// Copy to clipboard
+	await vscode.env.clipboard.writeText(prompt);
+	vscode.window.showInformationMessage('🛡️ Prompt de correção copiado! Cole no chat da IA (Cmd+V).');
+}
+
+function buildFixPrompt(finding: {
+	file: string;
+	line: number;
+	title: string;
+	cwe: string;
+	description: string;
+	suggestion: string;
+	suggestedFix: string | null;
+	snippet: string;
+}): string {
+	let prompt = `🛡️ **Correção de Segurança — ${finding.cwe}**\n\n`;
+	prompt += `**Vulnerabilidade encontrada:** ${finding.title}\n`;
+	prompt += `**Arquivo:** ${finding.file}, linha ${finding.line}\n`;
+	prompt += `**Código vulnerável:**\n\`\`\`\n${finding.snippet}\n\`\`\`\n\n`;
+	prompt += `**Problema:** ${finding.description}\n\n`;
+	prompt += `**Como corrigir:** ${finding.suggestion}\n\n`;
+
+	if (finding.suggestedFix) {
+		prompt += `**Correção sugerida:**\n\`\`\`\n${finding.suggestedFix}\n\`\`\`\n\n`;
+	}
+
+	prompt += `Por favor, aplique essa correção no arquivo \`${finding.file}\` na linha ${finding.line}. `;
+	prompt += `Explique brevemente por que essa mudança é necessária do ponto de vista de segurança `;
+	prompt += `e garanta que a correção não quebre a funcionalidade existente.`;
+
+	return prompt;
+}
+
+// ─── DISMISS FINDING (False Positive) ─────────────────────────────────────────
+
+async function dismissFinding(findingArg: unknown, sidebarProvider: SecuritySidebarProvider): Promise<void> {
+	let findingInfo: { id: string; file: string; line: number };
+
+	try {
+		if (typeof findingArg === 'string') {
+			findingInfo = JSON.parse(findingArg);
+		} else if (typeof findingArg === 'object' && findingArg !== null) {
+			findingInfo = findingArg as typeof findingInfo;
+		} else {
+			throw new Error('Invalid');
+		}
+	} catch {
+		try {
+			findingInfo = JSON.parse(decodeURIComponent(String(findingArg)));
+		} catch {
+			return;
+		}
+	}
+
+	// Remove from current findings
+	currentFindings = currentFindings.filter(f =>
+		!(f.id === findingInfo.id && f.file === findingInfo.file && f.line === findingInfo.line)
+	);
+
+	// Update diagnostics and sidebar
+	updateDiagnostics(currentFindings);
+	sidebarProvider.updateFindings(currentFindings);
+
+	vscode.window.showInformationMessage(`🛡️ Finding ignorado como falso positivo.`);
+}
+
+// ─── GIT WATCHER (triggers scan on commit/stage) ─────────────────────────────
+
+function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
 	const workspaceFolder = getWorkspaceFolder();
 	if (!workspaceFolder) {
 		return;
 	}
 
-	// Watch for COMMIT_EDITMSG which is created when git commit starts
-	const commitMsgPath = path.join(workspaceFolder, '.git', 'COMMIT_EDITMSG');
 	const gitDir = path.join(workspaceFolder, '.git');
-
 	if (!fs.existsSync(gitDir)) {
 		return;
 	}
 
-	const watcher = vscode.workspace.createFileSystemWatcher(
-		new vscode.RelativePattern(gitDir, 'COMMIT_EDITMSG')
-	);
+	// Use native fs.watch for .git directory — more reliable than vscode file watchers
+	// since .git is often excluded from IDE file watching
+	let debounceTimer: NodeJS.Timeout | undefined;
 
-	watcher.onDidCreate(() => showPreCommitWarning(sidebarProvider));
-	watcher.onDidChange(() => showPreCommitWarning(sidebarProvider));
+	const watcher = fs.watch(gitDir, (eventType, filename) => {
+		if (!filename) { return; }
 
-	context.subscriptions.push(watcher);
+		// Trigger on: index (git add), COMMIT_EDITMSG (git commit)
+		if (filename === 'index' || filename === 'COMMIT_EDITMSG') {
+			// Debounce to avoid multiple rapid triggers
+			if (debounceTimer) {
+				clearTimeout(debounceTimer);
+			}
+			debounceTimer = setTimeout(() => {
+				onGitOperation(sidebarProvider);
+			}, 500);
+		}
+	});
+
+	context.subscriptions.push({
+		dispose: () => {
+			watcher.close();
+			if (debounceTimer) { clearTimeout(debounceTimer); }
+		}
+	});
 }
 
-async function showPreCommitWarning(sidebarProvider: SecuritySidebarProvider): Promise<void> {
-	// Run a fresh scan to get current findings
-	const findings = await scanWorkspace();
+async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise<void> {
+	const findings = await runSecurityScan(sidebarProvider);
 
 	if (findings.length === 0) {
 		return;
@@ -140,29 +479,25 @@ async function showPreCommitWarning(sidebarProvider: SecuritySidebarProvider): P
 
 	let summary = '🛡️ Heads up! ';
 	const parts: string[] = [];
-	if (criticalCount > 0) {
-		parts.push(`${criticalCount} critical`);
-	}
-	if (highCount > 0) {
-		parts.push(`${highCount} high`);
-	}
-	if (otherCount > 0) {
-		parts.push(`${otherCount} other`);
-	}
-	summary += `Encontrei ${parts.join(', ')} finding(s) de segurança no código. `;
-	summary += 'Vale dar uma olhada antes de commitar — a pipeline pode reclamar depois. 😉';
+	if (criticalCount > 0) { parts.push(`${criticalCount} critical`); }
+	if (highCount > 0) { parts.push(`${highCount} high`); }
+	if (otherCount > 0) { parts.push(`${otherCount} other`); }
+
+	summary += `Encontrei ${parts.join(', ')} finding(s) nas suas alterações. `;
+	summary += 'Vale dar uma olhada — a pipeline pode reclamar depois. 😉';
 
 	const action = await vscode.window.showWarningMessage(
 		summary,
 		'Ver Findings',
-		'Commitar Mesmo Assim'
+		'Seguir em Frente'
 	);
 
 	if (action === 'Ver Findings') {
-		// Focus the sidebar
 		await vscode.commands.executeCommand('cybersecurity.findingsView.focus');
 	}
 }
+
+// ─── STEERING FILES DISTRIBUTION ─────────────────────────────────────────────
 
 async function bootstrapProject(context: vscode.ExtensionContext): Promise<void> {
 	const workspaceFolder = getWorkspaceFolder();
@@ -171,18 +506,19 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 		return;
 	}
 
-	const selectedTargets = await vscode.window.showQuickPick(
-		[
-			{ label: 'Kiro', description: '.kiro/steering/', id: 'kiro', picked: true },
-			{ label: 'Cursor', description: '.cursor/rules/', id: 'cursor', picked: true },
-			{ label: 'VS Code', description: '.vscode/steering/', id: 'vscode', picked: true },
-			{ label: 'Claude', description: 'CLAUDE.md + .claude/rules/', id: 'claude', picked: true },
-		],
-		{
-			canPickMany: true,
-			placeHolder: 'Selecione as IDEs para aplicar os padrões de segurança',
-		}
-	);
+	const currentIde = detectIDE();
+
+	const options = [
+		{ label: 'Kiro', description: '.kiro/steering/', id: 'kiro', picked: currentIde === 'kiro' },
+		{ label: 'Cursor', description: '.cursor/rules/', id: 'cursor', picked: currentIde === 'cursor' },
+		{ label: 'VS Code / Copilot', description: '.github/copilot-instructions.md', id: 'vscode', picked: currentIde === 'vscode' },
+		{ label: 'Claude', description: 'CLAUDE.md + .claude/rules/', id: 'claude', picked: true },
+	];
+
+	const selectedTargets = await vscode.window.showQuickPick(options, {
+		canPickMany: true,
+		placeHolder: `IDE detectada: ${currentIde}. Selecione onde aplicar os padrões.`,
+	});
 
 	if (!selectedTargets || selectedTargets.length === 0) {
 		return;
@@ -197,6 +533,9 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 		}
 	}
 
+	// Always install the GitHub workflow for AppSec protection
+	applied += await applyGitHubWorkflow(context, workspaceFolder);
+
 	vscode.window.showInformationMessage(
 		`✅ Padrões de segurança aplicados: ${applied} arquivo(s) em ${selectedTargets.length} IDE(s).`
 	);
@@ -210,49 +549,34 @@ async function updateStandards(context: vscode.ExtensionContext): Promise<void> 
 	}
 
 	let updated = 0;
+	const currentIde = detectIDE();
 
-	// Update each IDE target if directory exists
-	for (const [ide, targetPath] of Object.entries(IDE_TARGETS)) {
-		const targetDir = path.join(workspaceFolder, targetPath);
+	// Update current IDE files
+	const config = IDE_CONFIGS[currentIde];
+	if (config) {
+		const targetDir = path.join(workspaceFolder, config.targetDir);
 		if (fs.existsSync(targetDir)) {
-			updated += await applyIdeFiles(context, workspaceFolder, ide, true);
+			updated += await applyIdeFiles(context, workspaceFolder, currentIde, true);
 		}
 	}
 
-	// Update Claude files if they exist
+	// Update Claude files
 	const claudeRulesDir = path.join(workspaceFolder, '.claude', 'rules');
-	if (fs.existsSync(claudeRulesDir) || fs.existsSync(path.join(workspaceFolder, 'CLAUDE.md'))) {
+	if (fs.existsSync(claudeRulesDir)) {
 		updated += await applyClaudeFiles(context, workspaceFolder, true);
 	}
 
 	if (updated > 0) {
-		vscode.window.showInformationMessage(
-			`✅ Padrões atualizados: ${updated} arquivo(s) sincronizado(s).`
-		);
+		vscode.window.showInformationMessage(`✅ Padrões atualizados: ${updated} arquivo(s) sincronizado(s).`);
 	} else {
-		vscode.window.showInformationMessage(
-			'Nenhum padrão encontrado para atualizar. Execute "Bootstrap Project" primeiro.'
-		);
+		vscode.window.showInformationMessage('Nenhum padrão encontrado para atualizar. Execute "Bootstrap Project" primeiro.');
 	}
 }
 
 async function showGuidelines(context: vscode.ExtensionContext): Promise<void> {
-	const standardsDir = path.join(context.extensionPath, 'standards', 'steering');
-
-	const files = STEERING_FILES.map(f => ({
-		label: f.replace('.md', '').replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-		description: f,
-		file: path.join(standardsDir, f),
-	}));
-
-	const selected = await vscode.window.showQuickPick(files, {
-		placeHolder: 'Selecione a guideline para visualizar',
-	});
-
-	if (selected) {
-		const doc = await vscode.workspace.openTextDocument(selected.file);
-		await vscode.window.showTextDocument(doc, { preview: true });
-	}
+	const guidelinePath = path.join(context.extensionPath, 'standards', 'steering', 'appsec-rules.md');
+	const doc = await vscode.workspace.openTextDocument(guidelinePath);
+	await vscode.window.showTextDocument(doc, { preview: true });
 }
 
 async function autoApplyIfNeeded(context: vscode.ExtensionContext): Promise<void> {
@@ -268,30 +592,48 @@ async function autoApplyIfNeeded(context: vscode.ExtensionContext): Promise<void
 		return;
 	}
 
-	// Apply steering files silently — always keep them in sync
 	await applyToAllTargets(context, workspaceFolder, true);
 }
 
 async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFolder: string, silent: boolean = false): Promise<void> {
 	let applied = 0;
+	const currentIde = detectIDE();
 
-	// Apply Kiro files
-	applied += await applyIdeFiles(context, workspaceFolder, 'kiro', silent);
+	// Apply only for the current IDE
+	applied += await applyIdeFiles(context, workspaceFolder, currentIde, silent);
 
-	// Apply Cursor files
-	applied += await applyIdeFiles(context, workspaceFolder, 'cursor', silent);
-
-	// Apply VS Code files (uses same as Kiro)
-	applied += await applyIdeFiles(context, workspaceFolder, 'vscode', silent);
-
-	// Apply Claude files
+	// Always apply Claude files (dev may use Claude Code in terminal)
 	applied += await applyClaudeFiles(context, workspaceFolder, silent);
 
+	// Always apply GitHub workflow for AppSec protection
+	applied += await applyGitHubWorkflow(context, workspaceFolder, silent);
+
 	if (!silent && applied > 0) {
-		vscode.window.showInformationMessage(
-			`✅ Padrões de segurança aplicados: ${applied} arquivo(s).`
-		);
+		vscode.window.showInformationMessage(`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`);
 	}
+}
+
+async function applyGitHubWorkflow(
+	context: vscode.ExtensionContext,
+	workspaceFolder: string,
+	overwrite: boolean = false
+): Promise<number> {
+	const targetDir = path.join(workspaceFolder, '.github', 'workflows');
+	const sourceDir = path.join(context.extensionPath, 'standards', 'github', 'workflows');
+
+	if (!fs.existsSync(targetDir)) {
+		fs.mkdirSync(targetDir, { recursive: true });
+	}
+
+	let count = 0;
+	for (const file of GITHUB_WORKFLOW_FILES) {
+		const source = path.join(sourceDir, file);
+		const dest = path.join(targetDir, file);
+		if (!fs.existsSync(source)) { continue; }
+		count += await copySingleFile(source, dest, file, overwrite);
+	}
+
+	return count;
 }
 
 async function applyIdeFiles(
@@ -300,54 +642,21 @@ async function applyIdeFiles(
 	ide: string,
 	overwrite: boolean = false
 ): Promise<number> {
-	const targetDir = path.join(workspaceFolder, IDE_TARGETS[ide]);
-	let sourceDir: string;
-	let files: string[];
+	const config = IDE_CONFIGS[ide];
+	if (!config) { return 0; }
 
-	switch (ide) {
-		case 'kiro':
-			sourceDir = path.join(context.extensionPath, 'standards', 'kiro', 'steering');
-			files = KIRO_FILES;
-			break;
-		case 'cursor':
-			sourceDir = path.join(context.extensionPath, 'standards', 'cursor', 'rules');
-			files = CURSOR_FILES;
-			break;
-		case 'vscode':
-			// VS Code uses same files as Kiro
-			sourceDir = path.join(context.extensionPath, 'standards', 'kiro', 'steering');
-			files = KIRO_FILES;
-			break;
-		default:
-			return 0;
-	}
+	const targetDir = path.join(workspaceFolder, config.targetDir);
+	const sourceDir = path.join(context.extensionPath, config.sourceDir);
 
 	if (!fs.existsSync(targetDir)) {
 		fs.mkdirSync(targetDir, { recursive: true });
 	}
 
 	let count = 0;
-	for (const file of files) {
+	for (const file of config.files) {
 		const source = path.join(sourceDir, file);
 		const dest = path.join(targetDir, file);
-
-		if (!fs.existsSync(source)) {
-			continue;
-		}
-
-		count += await copySingleFile(source, dest, file, overwrite);
-	}
-
-	// Also copy legacy steering files (appsec-rules.md, executive.md) for backward compat
-	const legacyDir = path.join(context.extensionPath, 'standards', 'steering');
-	for (const file of STEERING_FILES) {
-		const source = path.join(legacyDir, file);
-		const dest = path.join(targetDir, file);
-
-		if (!fs.existsSync(source)) {
-			continue;
-		}
-
+		if (!fs.existsSync(source)) { continue; }
 		count += await copySingleFile(source, dest, file, overwrite);
 	}
 
@@ -362,19 +671,6 @@ async function applyClaudeFiles(
 	const claudeSourceDir = path.join(context.extensionPath, 'standards', 'claude');
 	let count = 0;
 
-	// Copy CLAUDE.md to project root
-	for (const file of CLAUDE_FILES.root) {
-		const source = path.join(claudeSourceDir, file);
-		const dest = path.join(workspaceFolder, file);
-
-		if (!fs.existsSync(source)) {
-			continue;
-		}
-
-		count += await copySingleFile(source, dest, file, overwrite);
-	}
-
-	// Copy rules to .claude/rules/
 	const rulesDir = path.join(workspaceFolder, '.claude', 'rules');
 	if (!fs.existsSync(rulesDir)) {
 		fs.mkdirSync(rulesDir, { recursive: true });
@@ -383,30 +679,19 @@ async function applyClaudeFiles(
 	for (const file of CLAUDE_FILES.rules) {
 		const source = path.join(claudeSourceDir, 'rules', file);
 		const dest = path.join(rulesDir, file);
-
-		if (!fs.existsSync(source)) {
-			continue;
-		}
-
+		if (!fs.existsSync(source)) { continue; }
 		count += await copySingleFile(source, dest, file, overwrite);
 	}
 
 	return count;
 }
 
-async function copySingleFile(
-	source: string,
-	dest: string,
-	fileName: string,
-	overwrite: boolean
-): Promise<number> {
+async function copySingleFile(source: string, dest: string, fileName: string, overwrite: boolean): Promise<number> {
 	const sourceContent = fs.readFileSync(source, 'utf-8');
 
 	if (fs.existsSync(dest)) {
 		const destContent = fs.readFileSync(dest, 'utf-8');
-		if (sourceContent === destContent) {
-			return 0;
-		}
+		if (sourceContent === destContent) { return 0; }
 
 		if (!overwrite) {
 			const action = await vscode.window.showWarningMessage(
@@ -414,10 +699,7 @@ async function copySingleFile(
 				'Sobrescrever',
 				'Manter atual'
 			);
-
-			if (action !== 'Sobrescrever') {
-				return 0;
-			}
+			if (action !== 'Sobrescrever') { return 0; }
 		}
 	}
 
@@ -433,4 +715,8 @@ function getWorkspaceFolder(): string | undefined {
 	return folders[0].uri.fsPath;
 }
 
-export function deactivate() {}
+export function deactivate() {
+	if (diagnosticCollection) {
+		diagnosticCollection.dispose();
+	}
+}
