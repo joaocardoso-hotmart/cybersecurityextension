@@ -10,7 +10,6 @@ on:
       - ".claude/rules/appsec-rules.md"
       - ".cursor/rules/appsec-rules.mdc"
       - ".vscode/steering/appsec-rules.md"
-      - "CLAUDE.md"
 
 permissions:
   contents: read
@@ -40,7 +39,6 @@ jobs:
             ".claude/rules/appsec-rules.md"
             ".cursor/rules/appsec-rules.mdc"
             ".vscode/steering/appsec-rules.md"
-            "CLAUDE.md"
           )
 
           CHANGED_FILES=""
@@ -138,8 +136,7 @@ jobs:
               '.kiro/steering/appsec-rules.md',
               '.claude/rules/appsec-rules.md',
               '.cursor/rules/appsec-rules.mdc',
-              '.vscode/steering/appsec-rules.md',
-              'CLAUDE.md'
+              '.vscode/steering/appsec-rules.md'
             ];
 
             const baseBranch = context.payload.pull_request.base.ref;

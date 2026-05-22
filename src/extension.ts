@@ -6,7 +6,6 @@ import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from '.
 import { ensureOpenGrep } from './semgrep';
 
 const CLAUDE_FILES = {
-	root: ['CLAUDE.md'],
 	rules: ['appsec-rules.md'],
 };
 
@@ -563,7 +562,7 @@ async function updateStandards(context: vscode.ExtensionContext): Promise<void> 
 
 	// Update Claude files
 	const claudeRulesDir = path.join(workspaceFolder, '.claude', 'rules');
-	if (fs.existsSync(claudeRulesDir) || fs.existsSync(path.join(workspaceFolder, 'CLAUDE.md'))) {
+	if (fs.existsSync(claudeRulesDir)) {
 		updated += await applyClaudeFiles(context, workspaceFolder, true);
 	}
 
@@ -671,13 +670,6 @@ async function applyClaudeFiles(
 ): Promise<number> {
 	const claudeSourceDir = path.join(context.extensionPath, 'standards', 'claude');
 	let count = 0;
-
-	for (const file of CLAUDE_FILES.root) {
-		const source = path.join(claudeSourceDir, file);
-		const dest = path.join(workspaceFolder, file);
-		if (!fs.existsSync(source)) { continue; }
-		count += await copySingleFile(source, dest, file, overwrite);
-	}
 
 	const rulesDir = path.join(workspaceFolder, '.claude', 'rules');
 	if (!fs.existsSync(rulesDir)) {
