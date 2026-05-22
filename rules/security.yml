@@ -1,0 +1,72 @@
+rules:
+  - id: hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: const $VAR = "..."
+          - pattern: let $VAR = "..."
+          - pattern: var $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|secret|api_key|apikey|private_key|db_password|api_secret|auth_token|access_key|secret_key)
+    message: "Credencial hardcoded detectada. Use variáveis de ambiente ou secret manager."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: sql-injection-concat
+    patterns:
+      - pattern-either:
+          - pattern: $DB.query("..." + $VAR + "...")
+          - pattern: $DB.query("..." + $VAR)
+          - pattern: |
+              $DB.query(`...${$VAR}...`)
+    message: "Possível SQL Injection. Use prepared statements."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+
+  - id: command-injection-exec
+    patterns:
+      - pattern-either:
+          - pattern: |
+              exec(`...${$VAR}...`)
+          - pattern: |
+              execSync(`...${$VAR}...`)
+    message: "Possível Command Injection. Use execFile com array de argumentos."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+
+  - id: xss-innerhtml
+    pattern: $EL.innerHTML = $VAR
+    message: "Possível XSS via innerHTML. Use textContent ou DOMPurify.sanitize()."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-79"]
+
+  - id: weak-crypto-md5
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createHash("md5")
+          - pattern: crypto.createHash("sha1")
+    message: "Criptografia fraca (MD5/SHA1). Use bcrypt/argon2 para senhas ou SHA-256+."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-327"]
+
+  - id: token-localstorage
+    patterns:
+      - pattern-either:
+          - pattern: localStorage.setItem("token", ...)
+          - pattern: localStorage.setItem("access_token", ...)
+          - pattern: localStorage.setItem("jwt", ...)
+    message: "Token em localStorage acessível via XSS. Use httpOnly cookies."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-922"]

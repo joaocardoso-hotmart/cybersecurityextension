@@ -1,0 +1,212 @@
+name: "🛡️ AppSec Rules Protection"
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+    paths:
+      - "**/appsec-rules.md"
+      - "**/appsec-rules.mdc"
+      - ".kiro/steering/appsec-rules.md"
+      - ".claude/rules/appsec-rules.md"
+      - ".cursor/rules/appsec-rules.mdc"
+      - ".vscode/steering/appsec-rules.md"
+      - "CLAUDE.md"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  appsec-guard:
+    name: "🔒 Security Rules Integrity Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: "🛡️ Detect changes to AppSec steering files"
+        id: detect
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  🛡️  AppSec Rules Protection — Security Integrity Check    ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          PROTECTED_FILES=(
+            ".kiro/steering/appsec-rules.md"
+            ".claude/rules/appsec-rules.md"
+            ".cursor/rules/appsec-rules.mdc"
+            ".vscode/steering/appsec-rules.md"
+            "CLAUDE.md"
+          )
+
+          CHANGED_FILES=""
+          HAS_VIOLATION="false"
+
+          for file in "${PROTECTED_FILES[@]}"; do
+            if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${file}$"; then
+              HAS_VIOLATION="true"
+              CHANGED_FILES="${CHANGED_FILES}${file}\n"
+            fi
+          done
+
+          echo "has_violation=${HAS_VIOLATION}" >> $GITHUB_OUTPUT
+
+          if [ "$HAS_VIOLATION" = "true" ]; then
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  ⛔ SECURITY VIOLATION DETECTED                              │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+            echo "🚨 The following protected security files were modified:"
+            echo ""
+            echo -e "$CHANGED_FILES" | while read -r f; do
+              if [ -n "$f" ]; then
+                echo "   ❌  $f"
+              fi
+            done
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  📋 DIFF DETAILS — Lines changed by this PR                 │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+
+            echo -e "$CHANGED_FILES" | while read -r f; do
+              if [ -n "$f" ] && [ -f "$f" ]; then
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "📄 File: $f"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                git diff origin/${{ github.base_ref }}...HEAD -- "$f" || true
+                echo ""
+              fi
+            done
+
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  🔒 ACTION REQUIRED                                          │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+            echo "  These files are PROTECTED by the AppSec team and define"
+            echo "  mandatory security policies for AI-assisted development."
+            echo ""
+            echo "  🔹 These rules were carefully crafted to prevent:"
+            echo "     • Hardcoded credentials in source code"
+            echo "     • Insecure code generation by AI assistants"
+            echo "     • Secret exposure in logs, tests, and configs"
+            echo "     • Weak cryptography and authentication bypasses"
+            echo "     • Supply chain and infrastructure vulnerabilities"
+            echo ""
+            echo "  🔹 What you need to do:"
+            echo "     1. Revert ALL changes to the protected files listed above"
+            echo "     2. Run: git checkout origin/${{ github.base_ref }} -- <file>"
+            echo "     3. Push the corrected branch"
+            echo ""
+            echo "  🔹 If you believe a change is necessary:"
+            echo "     • Open a request with the AppSec team"
+            echo "     • Provide business justification"
+            echo "     • Wait for explicit approval before modifying"
+            echo ""
+            echo "  📧 Contact: appsec@yourcompany.com"
+            echo "  📖 Policy: Security steering files are immutable without"
+            echo "     AppSec team authorization."
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║  ❌  THIS PR CANNOT BE MERGED — SECURITY VIOLATION         ║"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            exit 1
+          else
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  ✅ No changes detected in protected security files          │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+          fi
+
+      - name: "💬 Comment on PR with violation details"
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            const protectedFiles = [
+              '.kiro/steering/appsec-rules.md',
+              '.claude/rules/appsec-rules.md',
+              '.cursor/rules/appsec-rules.mdc',
+              '.vscode/steering/appsec-rules.md',
+              'CLAUDE.md'
+            ];
+
+            const baseBranch = context.payload.pull_request.base.ref;
+            let changedFiles = [];
+            let diffDetails = '';
+
+            for (const file of protectedFiles) {
+              try {
+                const diff = execSync(
+                  `git diff origin/${baseBranch}...HEAD -- "${file}"`,
+                  { encoding: 'utf-8' }
+                ).trim();
+                if (diff) {
+                  changedFiles.push(file);
+                  diffDetails += `\n<details>\n<summary>📄 <code>${file}</code></summary>\n\n\`\`\`diff\n${diff}\n\`\`\`\n</details>\n`;
+                }
+              } catch (e) {}
+            }
+
+            if (changedFiles.length === 0) return;
+
+            const body = `## 🛡️ AppSec Rules Protection — Security Violation Detected
+
+            > **⛔ This PR modifies protected security steering files.**
+
+            ### 🚨 Protected files changed:
+
+            ${changedFiles.map(f => `- ❌ \`${f}\``).join('\n')}
+
+            ### 📋 Changes detected:
+
+            ${diffDetails}
+
+            ---
+
+            ### 🔒 Why this is blocked:
+
+            These files define **mandatory security policies** maintained by the **AppSec team**. They enforce:
+
+            - 🔐 Prevention of hardcoded credentials
+            - 🛡️ Secure-by-default AI code generation
+            - 🚫 Secret exposure protection
+            - 🔑 Strong authentication & cryptography standards
+            - 📦 Supply chain security controls
+
+            ### ✅ How to fix:
+
+            1. **Revert** all changes to the protected files:
+               \`\`\`bash
+               git checkout origin/${baseBranch} -- ${changedFiles.join(' ')}
+               git commit -m "revert: restore protected appsec steering files"
+               git push
+               \`\`\`
+
+            2. If you need to modify these files, **contact the AppSec team** with a business justification.
+
+            ---
+
+            > 📧 **Contact:** appsec@yourcompany.com
+            > 📖 **Policy:** Security steering files are immutable without AppSec team authorization.
+
+            ---
+            *🤖 This check is automated by the AppSec Rules Protection workflow.*`;
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
