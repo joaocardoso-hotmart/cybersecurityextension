@@ -512,7 +512,7 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 		{ label: 'Kiro', description: '.kiro/steering/', id: 'kiro', picked: currentIde === 'kiro' },
 		{ label: 'Cursor', description: '.cursor/rules/', id: 'cursor', picked: currentIde === 'cursor' },
 		{ label: 'VS Code / Copilot', description: '.github/copilot-instructions.md', id: 'vscode', picked: currentIde === 'vscode' },
-		{ label: 'Claude', description: 'CLAUDE.md + .claude/rules/', id: 'claude', picked: true },
+		{ label: 'Claude', description: '.claude/rules/', id: 'claude', picked: false },
 	];
 
 	const selectedTargets = await vscode.window.showQuickPick(options, {
@@ -602,7 +602,7 @@ async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFold
 	// Apply only for the current IDE
 	applied += await applyIdeFiles(context, workspaceFolder, currentIde, silent);
 
-	// Always apply Claude files (dev may use Claude Code in terminal)
+	// Always apply .claude/rules/ (security rules for Claude Code in terminal)
 	applied += await applyClaudeFiles(context, workspaceFolder, silent);
 
 	// Always apply GitHub workflow for AppSec protection
