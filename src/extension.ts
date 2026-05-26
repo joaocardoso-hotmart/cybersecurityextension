@@ -881,8 +881,21 @@ async function applyIdeFiles(
 	for (const file of config.files) {
 		const source = path.join(sourceDir, file);
 		const dest = path.join(targetDir, file);
-		if (!fs.existsSync(source)) { continue; }
-		count += await copySingleFile(source, dest, file, overwrite);
+
+		// Try primary source path
+		if (fs.existsSync(source)) {
+			count += await copySingleFile(source, dest, file, overwrite);
+			continue;
+		}
+
+		// Fallback: try standards/steering/ (generic)
+		const fallbackSource = path.join(context.extensionPath, 'standards', 'steering', file);
+		if (fs.existsSync(fallbackSource)) {
+			count += await copySingleFile(fallbackSource, dest, file, overwrite);
+			continue;
+		}
+
+		console.warn(`[Hotmart AppSec] Source file not found: ${source}`);
 	}
 
 	return count;
