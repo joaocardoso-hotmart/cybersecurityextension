@@ -321,7 +321,8 @@ class SecurityHoverProvider implements vscode.HoverProvider {
 		const escapedSuggestion = escapeHtml(finding.suggestion);
 
 		// Build the command link for the copy prompt button
-		const encodedFinding = encodeURIComponent(JSON.stringify({
+		// VS Code command links in MarkdownString expect the argument as a JSON-encoded array after '?'
+		const findingData = JSON.stringify({
 			file: finding.file,
 			line: finding.line,
 			title: finding.title,
@@ -330,9 +331,10 @@ class SecurityHoverProvider implements vscode.HoverProvider {
 			suggestion: finding.suggestion,
 			suggestedFix: finding.suggestedFix || null,
 			snippet: finding.snippet,
-		}));
+		});
+		const encodedFinding = encodeURIComponent(JSON.stringify([findingData]));
 		const copyButton = `[$(clippy) Copiar prompt de correção](command:cybersecurityextension.applyFixWithAI?${encodedFinding} "Copia o prompt para colar no chat da IA")`;
-		const dismissButton = `[$(close) Falso Positivo](command:cybersecurityextension.dismissFinding?${encodeURIComponent(JSON.stringify({ id: finding.id, file: finding.file, line: finding.line }))} "Ignorar este finding")`;
+		const dismissButton = `[$(close) Falso Positivo](command:cybersecurityextension.dismissFinding?${encodeURIComponent(JSON.stringify([JSON.stringify({ id: finding.id, file: finding.file, line: finding.line })]))} "Ignorar este finding")`;
 
 		// Premium hover design using HTML
 		markdown.appendMarkdown(`<span style="color:#e6edf3;">**🛡️ ${escapeHtml(finding.title)}**</span>&nbsp;&nbsp;`);
