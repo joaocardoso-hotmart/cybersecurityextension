@@ -1,0 +1,114 @@
+#!/bin/bash
+# AppSec Pre-Commit Hook
+# Behavior:
+#   1st commit attempt with findings: BLOCK + show findings + instruct to retry
+#   2nd commit attempt (retry): ALLOW with warning
+#
+# State is tracked via a timestamp file in .appsec-state/
+
+STATE_DIR=".appsec-state"
+BYPASS_FILE="$STATE_DIR/commit-bypass"
+RULES_FILE="rules/security.yml"
+
+mkdir -p "$STATE_DIR"
+
+# Check if this is a retry (bypass file exists and is less than 60 seconds old)
+if [ -f "$BYPASS_FILE" ]; then
+  BYPASS_TIME=$(cat "$BYPASS_FILE")
+  CURRENT_TIME=$(date +%s)
+  DIFF=$((CURRENT_TIME - BYPASS_TIME))
+
+  # Allow if retry is within 60 seconds
+  if [ "$DIFF" -lt 60 ]; then
+    echo ""
+    echo "⚠️  [AppSec] Prosseguindo com o commit após confirmação do desenvolvedor."
+    echo "   O código será analisado novamente na pipeline de CI/CD."
+    echo ""
+    rm -f "$BYPASS_FILE"
+    exit 0
+  fi
+fi
+
+# Get staged files that are code
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
+
+if [ -z "$STAGED_FILES" ]; then
+  exit 0
+fi
+
+# Find the rules file (check multiple locations)
+if [ ! -f "$RULES_FILE" ]; then
+  GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+  if [ -f "$GIT_ROOT/rules/security.yml" ]; then
+    RULES_FILE="$GIT_ROOT/rules/security.yml"
+  else
+    exit 0
+  fi
+fi
+
+# Check if opengrep is installed
+if ! command -v opengrep &> /dev/null; then
+  echo "⚠️  [AppSec] OpenGrep não instalado. Scan de segurança ignorado."
+  exit 0
+fi
+
+# Run OpenGrep on staged files
+FILE_ARGS=""
+for f in $STAGED_FILES; do
+  FILE_ARGS="$FILE_ARGS $f"
+done
+
+OUTPUT=$(opengrep scan --json --quiet --config="$RULES_FILE" $FILE_ARGS 2>/dev/null)
+
+# Check if there are findings
+FINDINGS_COUNT=0
+if [ -n "$OUTPUT" ]; then
+  FINDINGS_COUNT=$(echo "$OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('results',[])))" 2>/dev/null || echo "0")
+fi
+
+if [ "$FINDINGS_COUNT" -eq 0 ] || [ "$FINDINGS_COUNT" = "0" ]; then
+  rm -f "$BYPASS_FILE"
+  exit 0
+fi
+
+# Findings detected — BLOCK first attempt
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "   COMMIT BLOQUEADO — Vulnerabilidades de segurança detectadas"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "   Encontrei $FINDINGS_COUNT finding(s) de segurança nos arquivos staged:"
+echo ""
+
+# Show findings details
+echo "$OUTPUT" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    for r in d.get('results', []):
+        f = r.get('path', '?')
+        line = r.get('start', {}).get('line', '?')
+        msg = r.get('extra', {}).get('message', r.get('check_id', '?'))
+        sev = r.get('extra', {}).get('severity', '?').upper()
+        print(f'   [{sev}] {f}:{line}')
+        print(f'         {msg[:80]}')
+        print()
+except:
+    pass
+" 2>/dev/null
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "   Para prosseguir mesmo assim, execute o commit novamente dentro de 60s:"
+echo ""
+echo "     git commit -m \"sua mensagem\""
+echo ""
+echo "   O código será analisado na pipeline e pode ser bloqueado no PR."
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Save bypass timestamp for retry
+date +%s > "$BYPASS_FILE"
+
+exit 1

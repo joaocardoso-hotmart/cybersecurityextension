@@ -127,6 +127,9 @@ function ensureSecurityHook(context: vscode.ExtensionContext): void {
 
 	// Always install Claude Code hook (Claude Code is used alongside any IDE)
 	installClaudeHookOnActivate(context, workspaceFolder);
+
+	// Always install git pre-commit hook
+	installGitPreCommitHook(context, workspaceFolder);
 }
 
 function installKiroHookOnActivate(context: vscode.ExtensionContext, workspaceFolder: string): void {
@@ -186,6 +189,34 @@ function installClaudeHookOnActivate(context: vscode.ExtensionContext, workspace
 	}
 
 	console.log('[Hotmart AppSec] Claude Code hook installed at .claude/settings.json');
+}
+
+function installGitPreCommitHook(context: vscode.ExtensionContext, workspaceFolder: string): void {
+	const gitHooksDir = path.join(workspaceFolder, '.git', 'hooks');
+	const preCommitFile = path.join(gitHooksDir, 'pre-commit');
+
+	// Only install if .git exists (it's a git repo)
+	if (!fs.existsSync(path.join(workspaceFolder, '.git'))) {
+		return;
+	}
+
+	// Don't overwrite if already exists
+	if (fs.existsSync(preCommitFile)) {
+		return;
+	}
+
+	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'pre-commit');
+	if (!fs.existsSync(sourceFile)) {
+		return;
+	}
+
+	if (!fs.existsSync(gitHooksDir)) {
+		fs.mkdirSync(gitHooksDir, { recursive: true });
+	}
+
+	fs.copyFileSync(sourceFile, preCommitFile);
+	fs.chmodSync(preCommitFile, 0o755);
+	console.log('[Hotmart AppSec] Git pre-commit hook installed');
 }
 
 // ─── SECURITY SCAN (only changed lines) ───────────────────────────────────────
