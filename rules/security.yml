@@ -1,5 +1,9 @@
 rules:
-  - id: hardcoded-secret
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-798: HARDCODED CREDENTIALS (Comprehensive)
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: hardcoded-secret-const
     patterns:
       - pattern-either:
           - pattern: const $VAR = "..."
@@ -7,25 +11,184 @@ rules:
           - pattern: var $VAR = "..."
       - metavariable-regex:
           metavariable: $VAR
-          regex: (?i)(password|passwd|secret|api_key|apikey|private_key|db_password|api_secret|auth_token|access_key|secret_key)
-    message: "Credencial hardcoded detectada. Use variáveis de ambiente ou secret manager."
+          regex: (?i)(password|passwd|pwd|pass|secret|api_key|apikey|api_token|apitoken|private_key|privatekey|db_password|db_pass|db_pwd|api_secret|apisecret|auth_token|authtoken|access_key|accesskey|access_key_id|accesskeyid|secret_key|secretkey|secret_access_key|secretaccesskey|chave_secreta|chavesecreta|chave_acesso|chaveacesso|senha|token|credential|credentials|aws_key|aws_secret|aws_token|client_secret|clientsecret|encryption_key|encryptionkey|signing_key|signingkey|jwt_secret|jwtsecret|session_secret|sessionsecret|cookie_secret|cookiesecret|master_key|masterkey|service_key|servicekey|connection_string|connectionstring|conn_str|connstr|database_url|databaseurl|redis_url|redisurl|mongo_uri|mongouri|mysql_password|postgres_password|pgpassword|oauth_secret|oauthsecret|webhook_secret|webhooksecret|slack_token|slacktoken|github_token|githubtoken|stripe_key|stripekey|twilio_token|twiliotoken|sendgrid_key|sendgridkey|firebase_key|firebasekey|gcp_key|gcpkey|azure_key|azurekey|heroku_key|herokukey|digitalocean_token|ssh_key|sshkey|deploy_key|deploykey|ci_token|citoken|npm_token|npmtoken|nuget_key|nugetkey|pypi_token|pypitoken|dockerhub_token|registry_password|sonar_token|sonartoken|vault_token|vaulttoken|consul_token|grafana_key|datadog_key|newrelic_key|sentry_dsn|algolia_key|mapbox_token|twitch_token|discord_token|telegram_token|bot_token|bottoken)
+    message: "Credencial hardcoded detectada na variável. Use variáveis de ambiente ou secret manager."
     languages: [typescript, javascript]
     severity: ERROR
     metadata:
       cwe: ["CWE-798"]
+      fix: "Use process.env.<VARIABLE_NAME> ou um secret manager (AWS Secrets Manager, HashiCorp Vault, etc.)"
+
+  - id: hardcoded-secret-assignment
+    patterns:
+      - pattern-either:
+          - pattern: $OBJ.$PROP = "..."
+          - pattern: $OBJ["$PROP"] = "..."
+      - metavariable-regex:
+          metavariable: $PROP
+          regex: (?i)(password|passwd|pwd|secret|api_key|apikey|private_key|token|credential|auth_token|access_key|secret_key|senha|chave|key|pass)
+    message: "Credencial atribuída diretamente no código. Use variáveis de ambiente."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: aws-credentials-constructor
+    patterns:
+      - pattern-either:
+          - pattern: |
+              { accessKeyId: $KEY, ... }
+          - pattern: |
+              { secretAccessKey: $SECRET, ... }
+          - pattern: |
+              { aws_access_key_id: $KEY, ... }
+          - pattern: |
+              { aws_secret_access_key: $SECRET, ... }
+    message: "Credenciais AWS hardcoded. Use IAM roles, variáveis de ambiente ou AWS Secrets Manager."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Use process.env.AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY ou configure IAM roles."
+
+  - id: aws-key-pattern-const
+    patterns:
+      - pattern-either:
+          - pattern: const $VAR = "AKIA..."
+          - pattern: let $VAR = "AKIA..."
+          - pattern: var $VAR = "AKIA..."
+    message: "AWS Access Key ID detectada (padrão AKIA*). Remova do código imediatamente."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Remova a chave e use process.env.AWS_ACCESS_KEY_ID ou IAM roles."
+
+  - id: generic-api-key-value
+    patterns:
+      - pattern-either:
+          - pattern: const $VAR = "sk-..."
+          - pattern: let $VAR = "sk-..."
+          - pattern: const $VAR = "sk_live_..."
+          - pattern: let $VAR = "sk_live_..."
+          - pattern: const $VAR = "sk_test_..."
+          - pattern: let $VAR = "sk_test_..."
+          - pattern: const $VAR = "pk_live_..."
+          - pattern: let $VAR = "pk_live_..."
+          - pattern: const $VAR = "ghp_..."
+          - pattern: let $VAR = "ghp_..."
+          - pattern: const $VAR = "gho_..."
+          - pattern: let $VAR = "gho_..."
+          - pattern: const $VAR = "xoxb-..."
+          - pattern: let $VAR = "xoxb-..."
+          - pattern: const $VAR = "xoxp-..."
+          - pattern: let $VAR = "xoxp-..."
+          - pattern: const $VAR = "SG...."
+          - pattern: let $VAR = "SG...."
+    message: "Token/API key com prefixo conhecido detectado no código. Use variáveis de ambiente."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Mova para variáveis de ambiente ou secret manager."
+
+  - id: connection-string-hardcoded
+    patterns:
+      - pattern-either:
+          - pattern: const $VAR = "mongodb://..."
+          - pattern: let $VAR = "mongodb://..."
+          - pattern: const $VAR = "mongodb+srv://..."
+          - pattern: let $VAR = "mongodb+srv://..."
+          - pattern: const $VAR = "postgres://..."
+          - pattern: let $VAR = "postgres://..."
+          - pattern: const $VAR = "postgresql://..."
+          - pattern: let $VAR = "postgresql://..."
+          - pattern: const $VAR = "mysql://..."
+          - pattern: let $VAR = "mysql://..."
+          - pattern: const $VAR = "redis://..."
+          - pattern: let $VAR = "redis://..."
+          - pattern: const $VAR = "amqp://..."
+          - pattern: let $VAR = "amqp://..."
+          - pattern: const $VAR = "mssql://..."
+          - pattern: let $VAR = "mssql://..."
+    message: "Connection string hardcoded com possíveis credenciais. Use variáveis de ambiente."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Use process.env.DATABASE_URL ou equivalente."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-89: SQL INJECTION (Comprehensive)
+  # ═══════════════════════════════════════════════════════════════════════════════
 
   - id: sql-injection-concat
     patterns:
       - pattern-either:
           - pattern: $DB.query("..." + $VAR + "...")
           - pattern: $DB.query("..." + $VAR)
+          - pattern: $DB.query($VAR + "...")
           - pattern: |
               $DB.query(`...${$VAR}...`)
-    message: "Possível SQL Injection. Use prepared statements."
+    message: "SQL Injection via concatenação. Use prepared statements/parameterized queries."
     languages: [typescript, javascript]
     severity: ERROR
     metadata:
       cwe: ["CWE-89"]
+      fix: "Use $DB.query('SELECT * FROM users WHERE id = $1', [userId])"
+
+  - id: sql-injection-execute
+    patterns:
+      - pattern-either:
+          - pattern: $DB.execute("..." + $VAR + "...")
+          - pattern: $DB.execute("..." + $VAR)
+          - pattern: |
+              $DB.execute(`...${$VAR}...`)
+          - pattern: $DB.exec("..." + $VAR + "...")
+          - pattern: |
+              $DB.exec(`...${$VAR}...`)
+    message: "SQL Injection via execute/exec. Use prepared statements."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+
+  - id: sql-injection-raw
+    patterns:
+      - pattern-either:
+          - pattern: $DB.raw("..." + $VAR + "...")
+          - pattern: |
+              $DB.raw(`...${$VAR}...`)
+          - pattern: $ORM.rawQuery("..." + $VAR + "...")
+          - pattern: |
+              $ORM.rawQuery(`...${$VAR}...`)
+          - pattern: |
+              $KNEX.raw(`...${$VAR}...`)
+    message: "SQL Injection via raw query. Use bindings/placeholders."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Use $DB.raw('SELECT * FROM users WHERE id = ?', [userId])"
+
+  - id: sql-injection-sequelize
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $MODEL.findAll({ where: $SEQUELIZE.literal(`...${$VAR}...`) })
+          - pattern: |
+              $SEQUELIZE.query(`...${$VAR}...`)
+          - pattern: |
+              $SEQUELIZE.query("..." + $VAR + "...")
+    message: "SQL Injection via Sequelize literal/query. Use replacements ou bind."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-78: COMMAND INJECTION (Comprehensive)
+  # ═══════════════════════════════════════════════════════════════════════════════
 
   - id: command-injection-exec
     patterns:
@@ -34,30 +197,303 @@ rules:
               exec(`...${$VAR}...`)
           - pattern: |
               execSync(`...${$VAR}...`)
-    message: "Possível Command Injection. Use execFile com array de argumentos."
+          - pattern: exec("..." + $VAR + "...")
+          - pattern: exec("..." + $VAR)
+          - pattern: execSync("..." + $VAR + "...")
+          - pattern: execSync("..." + $VAR)
+    message: "Command Injection. Use execFile/execFileSync com array de argumentos."
     languages: [typescript, javascript]
     severity: ERROR
     metadata:
       cwe: ["CWE-78"]
+      fix: "Use child_process.execFile(cmd, [arg1, arg2]) em vez de exec com interpolação."
+
+  - id: command-injection-spawn-shell
+    patterns:
+      - pattern-either:
+          - pattern: |
+              spawn($CMD, $ARGS, { ..., shell: true, ... })
+          - pattern: |
+              spawnSync($CMD, $ARGS, { ..., shell: true, ... })
+    message: "spawn com shell:true é vulnerável a command injection. Remova shell:true."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      fix: "Remova a opção shell:true e passe argumentos como array."
+
+  - id: command-injection-eval
+    patterns:
+      - pattern-either:
+          - pattern: eval($VAR)
+          - pattern: eval("..." + $VAR + "...")
+          - pattern: |
+              eval(`...${$VAR}...`)
+          - pattern: new Function($VAR)
+          - pattern: new Function("..." + $VAR)
+          - pattern: |
+              new Function(`...${$VAR}...`)
+          - pattern: setTimeout($VAR, ...)
+          - pattern: setInterval($VAR, ...)
+    message: "Execução dinâmica de código (eval/Function/setTimeout com string). Risco de code injection."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-95"]
+      fix: "Evite eval() e new Function(). Use alternativas seguras como JSON.parse() ou AST parsers."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-79: CROSS-SITE SCRIPTING (XSS) (Comprehensive)
+  # ═══════════════════════════════════════════════════════════════════════════════
 
   - id: xss-innerhtml
-    pattern: $EL.innerHTML = $VAR
-    message: "Possível XSS via innerHTML. Use textContent ou DOMPurify.sanitize()."
+    patterns:
+      - pattern-either:
+          - pattern: $EL.innerHTML = $VAR
+          - pattern: $EL.innerHTML += $VAR
+          - pattern: |
+              $EL.innerHTML = `...${$VAR}...`
+    message: "XSS via innerHTML. Use textContent ou DOMPurify.sanitize()."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+      fix: "Use element.textContent = value ou DOMPurify.sanitize(value)."
+
+  - id: xss-outerhtml
+    patterns:
+      - pattern-either:
+          - pattern: $EL.outerHTML = $VAR
+          - pattern: |
+              $EL.outerHTML = `...${$VAR}...`
+    message: "XSS via outerHTML. Use métodos seguros de manipulação do DOM."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+
+  - id: xss-document-write
+    patterns:
+      - pattern-either:
+          - pattern: document.write($VAR)
+          - pattern: document.write("..." + $VAR + "...")
+          - pattern: |
+              document.write(`...${$VAR}...`)
+          - pattern: document.writeln($VAR)
+          - pattern: |
+              document.writeln(`...${$VAR}...`)
+    message: "XSS via document.write. Use métodos seguros do DOM."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+
+  - id: xss-insertadjacenthtml
+    patterns:
+      - pattern-either:
+          - pattern: $EL.insertAdjacentHTML($POS, $VAR)
+          - pattern: |
+              $EL.insertAdjacentHTML($POS, `...${$VAR}...`)
+    message: "XSS via insertAdjacentHTML. Sanitize o input com DOMPurify."
     languages: [typescript, javascript]
     severity: WARNING
     metadata:
       cwe: ["CWE-79"]
 
-  - id: weak-crypto-md5
+  - id: xss-dangerouslysetinnerhtml
+    pattern: |
+      <$EL dangerouslySetInnerHTML={$VAR} />
+    message: "XSS via React dangerouslySetInnerHTML. Sanitize com DOMPurify antes de usar."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+      fix: "Use DOMPurify.sanitize(value) antes de passar para dangerouslySetInnerHTML."
+
+  - id: xss-jquery-html
+    patterns:
+      - pattern-either:
+          - pattern: $($SEL).html($VAR)
+          - pattern: $($SEL).append($VAR)
+          - pattern: $($SEL).prepend($VAR)
+          - pattern: $($SEL).after($VAR)
+          - pattern: $($SEL).before($VAR)
+    message: "XSS via jQuery DOM manipulation. Sanitize o input ou use .text()."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-79"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-22: PATH TRAVERSAL
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: path-traversal-join
+    patterns:
+      - pattern-either:
+          - pattern: path.join($BASE, $REQ.$PROP)
+          - pattern: path.join($BASE, $REQ.params.$PROP)
+          - pattern: path.join($BASE, $REQ.query.$PROP)
+          - pattern: path.join($BASE, $REQ.body.$PROP)
+          - pattern: path.resolve($BASE, $REQ.$PROP)
+    message: "Path Traversal. Valide e sanitize o input do usuário antes de construir caminhos."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-22"]
+      fix: "Use path.normalize() e verifique se o resultado está dentro do diretório base esperado."
+
+  - id: path-traversal-readfile
+    patterns:
+      - pattern-either:
+          - pattern: fs.readFile($REQ.$PROP, ...)
+          - pattern: fs.readFileSync($REQ.$PROP, ...)
+          - pattern: |
+              fs.readFile(`...${$REQ.$PROP}...`, ...)
+          - pattern: |
+              fs.readFileSync(`...${$REQ.$PROP}...`, ...)
+          - pattern: fs.readFile($REQ.params.$P, ...)
+          - pattern: fs.readFileSync($REQ.params.$P, ...)
+          - pattern: fs.readFile($REQ.query.$P, ...)
+          - pattern: fs.readFileSync($REQ.query.$P, ...)
+    message: "Path Traversal via leitura de arquivo com input do usuário. Valide o caminho."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-22"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-918: SERVER-SIDE REQUEST FORGERY (SSRF)
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: ssrf-fetch
+    patterns:
+      - pattern-either:
+          - pattern: fetch($REQ.$PROP)
+          - pattern: fetch($REQ.params.$P)
+          - pattern: fetch($REQ.query.$P)
+          - pattern: fetch($REQ.body.$P)
+          - pattern: |
+              fetch(`...${$REQ.$PROP}...`)
+          - pattern: |
+              fetch(`...${$VAR}...`)
+    message: "Possível SSRF. Valide e restrinja URLs antes de fazer requisições server-side."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-918"]
+      fix: "Valide a URL contra uma allowlist de domínios permitidos. Bloqueie IPs internos (127.0.0.1, 10.x, 172.16.x, 192.168.x)."
+
+  - id: ssrf-axios
+    patterns:
+      - pattern-either:
+          - pattern: axios.get($REQ.$PROP)
+          - pattern: axios.get($REQ.query.$P)
+          - pattern: axios.get($REQ.body.$P)
+          - pattern: |
+              axios.get(`...${$VAR}...`)
+          - pattern: axios.post($REQ.$PROP, ...)
+          - pattern: |
+              axios.post(`...${$VAR}...`, ...)
+          - pattern: axios($REQ.$PROP)
+          - pattern: |
+              axios({ url: `...${$VAR}...`, ... })
+    message: "Possível SSRF via axios. Valide URLs contra allowlist."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-918"]
+
+  - id: ssrf-http-request
+    patterns:
+      - pattern-either:
+          - pattern: http.get($REQ.$PROP, ...)
+          - pattern: |
+              http.get(`...${$VAR}...`, ...)
+          - pattern: |
+              http.request({ ..., host: $VAR, ... })
+          - pattern: |
+              http.request({ ..., hostname: $VAR, ... })
+          - pattern: https.get($REQ.$PROP, ...)
+          - pattern: |
+              https.get(`...${$VAR}...`, ...)
+    message: "Possível SSRF via http/https request. Valide o destino."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-918"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-327: WEAK CRYPTOGRAPHY
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: weak-crypto-hash
     patterns:
       - pattern-either:
           - pattern: crypto.createHash("md5")
           - pattern: crypto.createHash("sha1")
-    message: "Criptografia fraca (MD5/SHA1). Use bcrypt/argon2 para senhas ou SHA-256+."
+          - pattern: crypto.createHash("md4")
+          - pattern: crypto.createHash("ripemd160")
+    message: "Hash criptográfico fraco. Use SHA-256+ para integridade ou bcrypt/argon2 para senhas."
     languages: [typescript, javascript]
     severity: WARNING
     metadata:
       cwe: ["CWE-327"]
+      fix: "Use crypto.createHash('sha256') ou bcrypt/argon2id para hashing de senhas."
+
+  - id: weak-crypto-cipher
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createCipher("des", ...)
+          - pattern: crypto.createCipher("des-ede", ...)
+          - pattern: crypto.createCipher("rc4", ...)
+          - pattern: crypto.createCipher("rc2", ...)
+          - pattern: crypto.createCipher("blowfish", ...)
+          - pattern: crypto.createCipheriv("des", ...)
+          - pattern: crypto.createCipheriv("des-ede", ...)
+          - pattern: crypto.createCipheriv("rc4", ...)
+          - pattern: crypto.createCipheriv("aes-128-ecb", ...)
+          - pattern: crypto.createCipheriv("aes-256-ecb", ...)
+    message: "Algoritmo de criptografia fraco/inseguro. Use AES-256-GCM."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-327"]
+      fix: "Use crypto.createCipheriv('aes-256-gcm', key, iv) com IV aleatório."
+
+  - id: weak-random
+    patterns:
+      - pattern-either:
+          - pattern: Math.random()
+    message: "Math.random() não é criptograficamente seguro. Use crypto.randomBytes() ou crypto.randomUUID()."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-338"]
+      fix: "Use crypto.randomBytes(32) ou crypto.randomUUID() para valores sensíveis."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-502: INSECURE DESERIALIZATION
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: insecure-deserialization
+    patterns:
+      - pattern-either:
+          - pattern: JSON.parse($REQ.$PROP)
+          - pattern: JSON.parse($REQ.body)
+          - pattern: serialize.unserialize($VAR)
+          - pattern: node_serialize.unserialize($VAR)
+          - pattern: $YAML.load($VAR)
+    message: "Desserialização de dados não confiáveis. Valide o schema antes de processar."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-502"]
+      fix: "Valide o input com um schema (Joi, Zod, ajv) antes de desserializar."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-922: INSECURE STORAGE
+  # ═══════════════════════════════════════════════════════════════════════════════
 
   - id: token-localstorage
     patterns:
@@ -65,8 +501,475 @@ rules:
           - pattern: localStorage.setItem("token", ...)
           - pattern: localStorage.setItem("access_token", ...)
           - pattern: localStorage.setItem("jwt", ...)
-    message: "Token em localStorage acessível via XSS. Use httpOnly cookies."
+          - pattern: localStorage.setItem("refresh_token", ...)
+          - pattern: localStorage.setItem("session", ...)
+          - pattern: localStorage.setItem("auth", ...)
+          - pattern: localStorage.setItem("api_key", ...)
+          - pattern: localStorage.setItem("password", ...)
+          - pattern: localStorage.setItem("secret", ...)
+          - pattern: localStorage.setItem("credential", ...)
+    message: "Dados sensíveis em localStorage (acessível via XSS). Use httpOnly cookies."
     languages: [typescript, javascript]
     severity: WARNING
     metadata:
       cwe: ["CWE-922"]
+      fix: "Use cookies httpOnly + Secure + SameSite para tokens de autenticação."
+
+  - id: token-sessionstorage
+    patterns:
+      - pattern-either:
+          - pattern: sessionStorage.setItem("token", ...)
+          - pattern: sessionStorage.setItem("access_token", ...)
+          - pattern: sessionStorage.setItem("jwt", ...)
+          - pattern: sessionStorage.setItem("password", ...)
+          - pattern: sessionStorage.setItem("secret", ...)
+    message: "Dados sensíveis em sessionStorage (acessível via XSS). Use httpOnly cookies."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-922"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-601: OPEN REDIRECT
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: open-redirect
+    patterns:
+      - pattern-either:
+          - pattern: $RES.redirect($REQ.query.$P)
+          - pattern: $RES.redirect($REQ.params.$P)
+          - pattern: $RES.redirect($REQ.body.$P)
+          - pattern: |
+              $RES.redirect(`...${$REQ.query.$P}...`)
+          - pattern: window.location = $VAR
+          - pattern: window.location.href = $VAR
+          - pattern: |
+              window.location.href = `...${$VAR}...`
+          - pattern: window.location.assign($VAR)
+          - pattern: window.location.replace($VAR)
+    message: "Open Redirect. Valide a URL de destino contra uma allowlist."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-601"]
+      fix: "Valide que a URL de redirecionamento pertence ao mesmo domínio ou está em uma allowlist."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-352: CSRF / MISSING SECURITY HEADERS
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: cookie-no-httponly
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $RES.cookie($NAME, $VAL, { ..., httpOnly: false, ... })
+          - pattern: |
+              $RES.cookie($NAME, $VAL, { ... })
+    message: "Cookie sem httpOnly pode ser acessado via JavaScript (XSS). Adicione httpOnly: true."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-1004"]
+
+  - id: cookie-no-secure
+    pattern: |
+      $RES.cookie($NAME, $VAL, { ..., secure: false, ... })
+    message: "Cookie sem flag Secure será enviado em conexões HTTP não criptografadas."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-614"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-400: DENIAL OF SERVICE (ReDoS)
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: regex-dos
+    patterns:
+      - pattern-either:
+          - pattern: new RegExp($REQ.$PROP)
+          - pattern: new RegExp($REQ.query.$P)
+          - pattern: new RegExp($REQ.body.$P)
+          - pattern: new RegExp($REQ.params.$P)
+    message: "ReDoS: Regex construída com input do usuário. Use uma lib segura como re2."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-1333"]
+      fix: "Use a biblioteca 're2' para regex segura ou valide/escape o input antes."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-209: INFORMATION EXPOSURE VIA ERROR MESSAGES
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: error-info-leak
+    patterns:
+      - pattern-either:
+          - pattern: $RES.send($ERR.stack)
+          - pattern: |
+                         $RES.json({ ..., stack: $ERR.stack, ... })
+          - pattern: |
+                         $RES.json({ ..., error: $ERR.message, ... })
+          - pattern: $RES.status(...).send($ERR.stack)
+          - pattern: |
+                         $RES.status(...).json({ ..., stack: $ERR.stack, ... })
+    message: "Stack trace/detalhes de erro expostos ao cliente. Use mensagens genéricas."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-209"]
+      fix: "Logue o erro internamente e retorne uma mensagem genérica ao usuário."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-311: MISSING ENCRYPTION / INSECURE TRANSPORT
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: insecure-http-url
+    patterns:
+      - pattern-either:
+          - pattern: const $VAR = "http://..."
+          - pattern: let $VAR = "http://..."
+          - pattern: fetch("http://...")
+          - pattern: axios.get("http://...")
+          - pattern: axios.post("http://...", ...)
+    message: "URL HTTP sem criptografia. Use HTTPS para proteger dados em trânsito."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-319"]
+      fix: "Substitua http:// por https://."
+
+  - id: tls-reject-unauthorized-disabled
+    patterns:
+      - pattern-either:
+          - pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
+          - pattern: |
+              { ..., rejectUnauthorized: false, ... }
+    message: "Verificação TLS desabilitada. Isso permite ataques man-in-the-middle."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-295"]
+      fix: "Remova rejectUnauthorized: false. Use certificados válidos."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-863: BROKEN ACCESS CONTROL / IDOR
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: idor-direct-object-reference
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL.findById($REQ.params.$P)
+          - pattern: $MODEL.findByPk($REQ.params.$P)
+          - pattern: |
+                         $MODEL.findOne({ ..., id: $REQ.params.$P, ... })
+          - pattern: |
+                         $MODEL.deleteOne({ ..., _id: $REQ.params.$P, ... })
+          - pattern: |
+                         $MODEL.updateOne({ ..., _id: $REQ.params.$P, ... }, ...)
+    message: "Possível IDOR. Verifique se o usuário tem permissão para acessar este recurso."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-639"]
+      fix: "Adicione verificação de ownership: inclua o userId do usuário autenticado na query."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-94: CODE INJECTION / PROTOTYPE POLLUTION
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: prototype-pollution-merge
+    patterns:
+      - pattern-either:
+          - pattern: Object.assign($TARGET, $REQ.body)
+          - pattern: Object.assign($TARGET, $REQ.$PROP)
+          - pattern: "{ ...$TARGET, ...$REQ.body }"
+    message: "Prototype Pollution via merge de objeto com input do usuário. Use uma lib segura."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-1321"]
+      fix: "Use uma lib como lodash.merge com proteção ou valide as keys antes do merge."
+
+  - id: unsafe-require
+    patterns:
+      - pattern-either:
+          - pattern: require($VAR)
+          - pattern: |
+              require(`...${$VAR}...`)
+          - pattern: import($VAR)
+          - pattern: |
+              import(`...${$VAR}...`)
+    message: "Import/require dinâmico com variável. Risco de code injection via path manipulation."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-94"]
+      fix: "Use imports estáticos ou valide o input contra uma allowlist de módulos."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-532: LOG INJECTION / SENSITIVE DATA IN LOGS
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: sensitive-data-in-logs
+    patterns:
+      - pattern-either:
+          - pattern: console.log(..., $PASSWORD, ...)
+          - pattern: console.log(..., $TOKEN, ...)
+          - pattern: console.log(..., $SECRET, ...)
+          - pattern: |
+                         $LOGGER.info(..., { ..., password: $VAR, ... })
+          - pattern: |
+                         $LOGGER.debug(..., { ..., token: $VAR, ... })
+          - pattern: |
+                         $LOGGER.error(..., { ..., secret: $VAR, ... })
+    message: "Dados sensíveis podem estar sendo logados. Remova credenciais dos logs."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-532"]
+      fix: "Nunca logue senhas, tokens ou secrets. Use masking ou redação."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-287: AUTHENTICATION ISSUES
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: jwt-no-verify
+    patterns:
+      - pattern-either:
+          - pattern: jwt.decode($TOKEN)
+          - pattern: $JWT.decode($TOKEN)
+    message: "jwt.decode() não verifica a assinatura. Use jwt.verify() com secret/key."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-345"]
+      fix: "Use jwt.verify(token, secret) para validar a assinatura do token."
+
+  - id: jwt-weak-secret
+    patterns:
+      - pattern-either:
+          - pattern: jwt.sign($PAYLOAD, "...")
+          - pattern: jwt.verify($TOKEN, "...")
+    message: "JWT com secret hardcoded. Use variável de ambiente para o secret."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Use process.env.JWT_SECRET em vez de string literal."
+
+  - id: jwt-none-algorithm
+    patterns:
+      - pattern-either:
+          - pattern: |
+                         jwt.sign($PAYLOAD, $SECRET, { ..., algorithm: "none", ... })
+          - pattern: |
+                         jwt.verify($TOKEN, $SECRET, { ..., algorithms: ["none"], ... })
+    message: "JWT com algoritmo 'none' permite tokens forjados. Use RS256 ou HS256."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-327"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-434: UNRESTRICTED FILE UPLOAD
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: unrestricted-file-upload
+    patterns:
+      - pattern-either:
+          - pattern: multer({ ... })
+          - pattern: multer()
+    message: "Upload de arquivo sem restrição de tipo/tamanho. Configure fileFilter e limits."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-434"]
+      fix: "Configure multer com fileFilter para validar extensões e limits.fileSize para limitar tamanho."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-776: XML EXTERNAL ENTITY (XXE)
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: xxe-xml-parser
+    patterns:
+      - pattern-either:
+          - pattern: $PARSER.parseString($VAR, ...)
+          - pattern: new DOMParser().parseFromString($VAR, ...)
+          - pattern: libxmljs.parseXml($VAR)
+          - pattern: libxmljs.parseXmlString($VAR)
+    message: "Parsing XML de input não confiável pode levar a XXE. Desabilite entidades externas."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-611"]
+      fix: "Configure o parser para desabilitar DTD e entidades externas."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-200: INFORMATION DISCLOSURE
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: cors-wildcard
+    patterns:
+      - pattern-either:
+          - pattern: |
+              cors({ origin: "*" })
+          - pattern: |
+              cors({ origin: true })
+          - pattern: $RES.setHeader("Access-Control-Allow-Origin", "*")
+          - pattern: $RES.header("Access-Control-Allow-Origin", "*")
+    message: "CORS com wildcard permite qualquer origem. Restrinja a domínios confiáveis."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-942"]
+      fix: "Configure CORS com uma lista específica de origens permitidas."
+
+  - id: debug-mode-production
+    patterns:
+      - pattern-either:
+          - pattern: app.use($MORGAN("dev"))
+          - pattern: |
+              { ..., debug: true, ... }
+    message: "Modo debug pode expor informações sensíveis em produção."
+    languages: [typescript, javascript]
+    severity: INFO
+    metadata:
+      cwe: ["CWE-215"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-250: PRIVILEGE ESCALATION / DANGEROUS PERMISSIONS
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: dangerous-chmod
+    patterns:
+      - pattern-either:
+          - pattern: fs.chmod($PATH, 0o777, ...)
+          - pattern: fs.chmodSync($PATH, 0o777)
+          - pattern: fs.chmod($PATH, 0o766, ...)
+          - pattern: fs.chmodSync($PATH, 0o766)
+          - pattern: fs.chmod($PATH, "777", ...)
+          - pattern: fs.chmodSync($PATH, "777")
+    message: "Permissões excessivas (777/766). Use permissões mínimas necessárias."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-732"]
+      fix: "Use permissões restritivas como 0o644 (arquivos) ou 0o755 (diretórios executáveis)."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-943: NOSQL INJECTION
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: nosql-injection-mongo
+    patterns:
+      - pattern-either:
+          - pattern: |
+                         $COLLECTION.find({ ..., $FIELD: $REQ.body.$P, ... })
+          - pattern: |
+                         $COLLECTION.find({ ..., $FIELD: $REQ.query.$P, ... })
+          - pattern: |
+                         $COLLECTION.findOne({ ..., $FIELD: $REQ.body.$P, ... })
+          - pattern: |
+                         $COLLECTION.findOne({ ..., $FIELD: $REQ.query.$P, ... })
+          - pattern: |
+                         $COLLECTION.deleteMany({ ..., $FIELD: $REQ.body.$P, ... })
+          - pattern: |
+                         $COLLECTION.updateOne({ ..., $FIELD: $REQ.body.$P, ... }, ...)
+    message: "Possível NoSQL Injection. Valide e sanitize o input antes de usar em queries MongoDB."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-943"]
+      fix: "Use mongo-sanitize ou valide que o input não contém operadores ($gt, $ne, etc.)."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-312: CLEARTEXT STORAGE OF SENSITIVE DATA
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: plaintext-password-storage
+    patterns:
+      - pattern-either:
+          - pattern: |
+                         $MODEL.create({ ..., password: $REQ.body.password, ... })
+          - pattern: |
+                         $MODEL.save({ ..., password: $VAR, ... })
+          - pattern: $USER.password = $REQ.body.password
+          - pattern: $USER.password = $VAR
+    message: "Senha armazenada em texto plano. Use bcrypt/argon2 para hash antes de salvar."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-256"]
+      fix: "Use await bcrypt.hash(password, 12) antes de salvar no banco."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-1275: SENSITIVE COOKIE WITHOUT SAMESITE
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: cookie-no-samesite
+    pattern: |
+      $RES.cookie($NAME, $VAL, { ..., sameSite: "none", ... })
+    message: "Cookie com SameSite=None pode ser enviado em requisições cross-site (CSRF)."
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-1275"]
+      fix: "Use sameSite: 'strict' ou 'lax' para proteção contra CSRF."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-116: IMPROPER OUTPUT ENCODING (Template Injection)
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: template-injection
+    patterns:
+      - pattern-either:
+          - pattern: |
+                         $RES.render($TEMPLATE, { ..., content: $REQ.body.$P, ... })
+          - pattern: |
+                         $RES.render($TEMPLATE, { ..., data: $REQ.query.$P, ... })
+          - pattern: |
+              $ENGINE.compile(`...${$VAR}...`)
+          - pattern: |
+              Handlebars.compile($VAR)
+          - pattern: |
+              ejs.render($VAR, ...)
+    message: "Possível Server-Side Template Injection (SSTI). Não passe input do usuário diretamente para templates."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-94"]
+      fix: "Sanitize o input e use auto-escaping do template engine."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-362: RACE CONDITION (TOCTOU)
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: toctou-file-access
+    patterns:
+      - pattern-either:
+          - pattern: fs.existsSync($PATH)
+    message: "Possível race condition (TOCTOU): fs.existsSync seguido de operação no arquivo não é atômico. Use try/catch."
+    languages: [typescript, javascript]
+    severity: INFO
+    metadata:
+      cwe: ["CWE-367"]
+      fix: "Use try/catch com a operação direta em vez de verificar existência antes."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # CWE-918: HEADER INJECTION
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: header-injection
+    patterns:
+      - pattern-either:
+          - pattern: $RES.setHeader($NAME, $REQ.query.$P)
+          - pattern: $RES.setHeader($NAME, $REQ.body.$P)
+          - pattern: $RES.setHeader($NAME, $REQ.params.$P)
+          - pattern: $RES.header($NAME, $REQ.query.$P)
+    message: "Header Injection: input do usuário usado diretamente em headers HTTP."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-113"]
+      fix: "Valide e sanitize o input antes de usar em headers. Remova caracteres \\r\\n."

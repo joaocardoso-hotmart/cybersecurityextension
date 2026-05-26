@@ -5,13 +5,12 @@ import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
 import { ensureOpenGrep } from './semgrep';
 
+const KIRO_FILES = ['appsec-rules.md'];
+const CURSOR_FILES = ['appsec-rules.mdc'];
+
 const CLAUDE_FILES = {
 	rules: ['appsec-rules.md'],
 };
-
-const KIRO_FILES = ['appsec-rules.md'];
-const CURSOR_FILES = ['appsec-rules.mdc'];
-const VSCODE_FILES = ['appsec-rules.md'];
 
 const GITHUB_WORKFLOW_FILES = ['appsec-guard.yml'];
 
@@ -106,6 +105,87 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Auto-apply steering files on workspace open
 	autoApplyIfNeeded(context);
+
+	// Ensure preToolUse hook exists (runs on every activation)
+	ensureSecurityHook(context);
+}
+
+// ─── AUTO-INSTALL SECURITY HOOK ───────────────────────────────────────────────
+
+function ensureSecurityHook(context: vscode.ExtensionContext): void {
+	const workspaceFolder = getWorkspaceFolder();
+	if (!workspaceFolder) {
+		return;
+	}
+
+	const currentIde = detectIDE();
+
+	// Install Kiro hook if running in Kiro
+	if (currentIde === 'kiro') {
+		installKiroHookOnActivate(context, workspaceFolder);
+	}
+
+	// Always install Claude Code hook (Claude Code is used alongside any IDE)
+	installClaudeHookOnActivate(context, workspaceFolder);
+}
+
+function installKiroHookOnActivate(context: vscode.ExtensionContext, workspaceFolder: string): void {
+	const hooksDir = path.join(workspaceFolder, '.kiro', 'hooks');
+	const hookFile = path.join(hooksDir, 'appsec-gate.json');
+
+	if (fs.existsSync(hookFile)) {
+		return;
+	}
+
+	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.json');
+	if (!fs.existsSync(sourceFile)) {
+		return;
+	}
+
+	if (!fs.existsSync(hooksDir)) {
+		fs.mkdirSync(hooksDir, { recursive: true });
+	}
+
+	fs.copyFileSync(sourceFile, hookFile);
+	console.log('[Hotmart AppSec] Kiro hook installed at .kiro/hooks/appsec-gate.json');
+}
+
+function installClaudeHookOnActivate(context: vscode.ExtensionContext, workspaceFolder: string): void {
+	// Install .claude/settings.json with PreToolUse hook
+	const claudeDir = path.join(workspaceFolder, '.claude');
+	const settingsFile = path.join(claudeDir, 'settings.json');
+
+	if (fs.existsSync(settingsFile)) {
+		return;
+	}
+
+	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'claude', 'settings.json');
+	if (!fs.existsSync(sourceFile)) {
+		return;
+	}
+
+	if (!fs.existsSync(claudeDir)) {
+		fs.mkdirSync(claudeDir, { recursive: true });
+	}
+
+	fs.copyFileSync(sourceFile, settingsFile);
+
+	// Install the gate script
+	const appsecDir = path.join(workspaceFolder, '.appsec');
+	const scriptDest = path.join(appsecDir, 'appsec-gate.sh');
+
+	if (!fs.existsSync(scriptDest)) {
+		const scriptSource = path.join(context.extensionPath, 'standards', 'hooks', 'appsec-gate.sh');
+		if (fs.existsSync(scriptSource)) {
+			if (!fs.existsSync(appsecDir)) {
+				fs.mkdirSync(appsecDir, { recursive: true });
+			}
+			fs.copyFileSync(scriptSource, scriptDest);
+			fs.chmodSync(scriptDest, 0o755);
+		}
+	}
+
+	console.log('[Hotmart AppSec] Claude Code hook installed at .claude/settings.json');
 }
 
 // ─── SECURITY SCAN (only changed lines) ───────────────────────────────────────
@@ -439,39 +519,79 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 		return;
 	}
 
-	// Use native fs.watch for .git directory — more reliable than vscode file watchers
-	// since .git is often excluded from IDE file watching
+	// Capture the current index mtime at activation so we don't trigger on reload
+	let lastIndexSize = 0;
+	try {
+		const stat = fs.statSync(path.join(gitDir, 'index'));
+		lastIndexSize = stat.size;
+	} catch { /* */ }
+
+	// Grace period: ignore all events in the first 5 seconds after activation
+	// to avoid triggering on reload/startup
+	let ready = false;
+	const readyTimer = setTimeout(() => { ready = true; }, 5000);
+
 	let debounceTimer: NodeJS.Timeout | undefined;
 
 	const watcher = fs.watch(gitDir, (eventType, filename) => {
 		if (!filename) { return; }
+		if (!ready) { return; }
 
-		// Trigger on: index (git add), COMMIT_EDITMSG (git commit)
-		if (filename === 'index' || filename === 'COMMIT_EDITMSG') {
-			// Debounce to avoid multiple rapid triggers
-			if (debounceTimer) {
-				clearTimeout(debounceTimer);
-			}
-			debounceTimer = setTimeout(() => {
-				onGitOperation(sidebarProvider);
-			}, 500);
+		// Only trigger on index (git add) or COMMIT_EDITMSG (git commit)
+		if (filename !== 'index' && filename !== 'COMMIT_EDITMSG') {
+			return;
 		}
+
+		// For index changes, verify the file size actually changed
+		// (a real git add modifies the index size; git status reads don't)
+		if (filename === 'index') {
+			try {
+				const stat = fs.statSync(path.join(gitDir, 'index'));
+				if (stat.size === lastIndexSize) {
+					return;
+				}
+				lastIndexSize = stat.size;
+			} catch { return; }
+		}
+
+		// Debounce to batch rapid git operations
+		if (debounceTimer) {
+			clearTimeout(debounceTimer);
+		}
+		debounceTimer = setTimeout(() => {
+			onGitOperation(sidebarProvider);
+		}, 2000);
 	});
 
 	context.subscriptions.push({
 		dispose: () => {
 			watcher.close();
+			clearTimeout(readyTimer);
 			if (debounceTimer) { clearTimeout(debounceTimer); }
 		}
 	});
 }
 
+// Track last notification fingerprint to avoid repeated popups
+let lastNotificationFingerprint = '';
+
 async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise<void> {
 	const findings = await runSecurityScan(sidebarProvider);
 
 	if (findings.length === 0) {
+		// Clear the fingerprint when no findings
+		lastNotificationFingerprint = '';
 		return;
 	}
+
+	// Create a fingerprint of current findings to avoid duplicate notifications
+	const fingerprint = findings.map(f => `${f.file}:${f.line}:${f.id}`).sort().join('|');
+
+	// Only show popup if findings changed since last notification
+	if (fingerprint === lastNotificationFingerprint) {
+		return;
+	}
+	lastNotificationFingerprint = fingerprint;
 
 	const criticalCount = findings.filter(f => f.severity === 'critical').length;
 	const highCount = findings.filter(f => f.severity === 'high').length;
@@ -508,36 +628,22 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 
 	const currentIde = detectIDE();
 
-	const options = [
-		{ label: 'Kiro', description: '.kiro/steering/', id: 'kiro', picked: currentIde === 'kiro' },
-		{ label: 'Cursor', description: '.cursor/rules/', id: 'cursor', picked: currentIde === 'cursor' },
-		{ label: 'VS Code / Copilot', description: '.github/copilot-instructions.md', id: 'vscode', picked: currentIde === 'vscode' },
-		{ label: 'Claude', description: '.claude/rules/', id: 'claude', picked: false },
-	];
-
-	const selectedTargets = await vscode.window.showQuickPick(options, {
-		canPickMany: true,
-		placeHolder: `IDE detectada: ${currentIde}. Selecione onde aplicar os padrões.`,
-	});
-
-	if (!selectedTargets || selectedTargets.length === 0) {
-		return;
-	}
-
 	let applied = 0;
-	for (const target of selectedTargets) {
-		if (target.id === 'claude') {
-			applied += await applyClaudeFiles(context, workspaceFolder);
-		} else {
-			applied += await applyIdeFiles(context, workspaceFolder, target.id);
-		}
-	}
 
-	// Always install the GitHub workflow for AppSec protection
+	// Apply steering/rules only for the detected IDE
+	applied += await applyIdeFiles(context, workspaceFolder, currentIde);
+
+	// Always apply Claude rules (Claude Code can be used alongside any IDE)
+	applied += await applyClaudeFiles(context, workspaceFolder);
+
+	// Install preToolUse hooks only for the detected IDE
+	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
+
+	// GitHub workflow is IDE-agnostic (CI/CD protection)
 	applied += await applyGitHubWorkflow(context, workspaceFolder);
 
 	vscode.window.showInformationMessage(
-		`✅ Padrões de segurança aplicados: ${applied} arquivo(s) em ${selectedTargets.length} IDE(s).`
+		`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`
 	);
 }
 
@@ -551,7 +657,7 @@ async function updateStandards(context: vscode.ExtensionContext): Promise<void> 
 	let updated = 0;
 	const currentIde = detectIDE();
 
-	// Update current IDE files
+	// Update only current IDE files
 	const config = IDE_CONFIGS[currentIde];
 	if (config) {
 		const targetDir = path.join(workspaceFolder, config.targetDir);
@@ -560,21 +666,21 @@ async function updateStandards(context: vscode.ExtensionContext): Promise<void> 
 		}
 	}
 
-	// Update Claude files
+	// Always update Claude rules
 	const claudeRulesDir = path.join(workspaceFolder, '.claude', 'rules');
 	if (fs.existsSync(claudeRulesDir)) {
 		updated += await applyClaudeFiles(context, workspaceFolder, true);
 	}
 
 	if (updated > 0) {
-		vscode.window.showInformationMessage(`✅ Padrões atualizados: ${updated} arquivo(s) sincronizado(s).`);
+		vscode.window.showInformationMessage(`✅ Padrões atualizados: ${updated} arquivo(s) sincronizado(s) para ${currentIde}.`);
 	} else {
 		vscode.window.showInformationMessage('Nenhum padrão encontrado para atualizar. Execute "Bootstrap Project" primeiro.');
 	}
 }
 
 async function showGuidelines(context: vscode.ExtensionContext): Promise<void> {
-	const guidelinePath = path.join(context.extensionPath, 'standards', 'steering', 'appsec-rules.md');
+	const guidelinePath = path.join(context.extensionPath, 'standards', 'steering', 'copilot-instructions.md');
 	const doc = await vscode.workspace.openTextDocument(guidelinePath);
 	await vscode.window.showTextDocument(doc, { preview: true });
 }
@@ -599,19 +705,107 @@ async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFold
 	let applied = 0;
 	const currentIde = detectIDE();
 
-	// Apply only for the current IDE
+	// Apply only for the current IDE — no cross-IDE pollution
 	applied += await applyIdeFiles(context, workspaceFolder, currentIde, silent);
 
-	// Always apply .claude/rules/ (security rules for Claude Code in terminal)
+	// Always apply Claude rules (Claude Code can be used alongside any IDE)
 	applied += await applyClaudeFiles(context, workspaceFolder, silent);
 
-	// Always apply GitHub workflow for AppSec protection
+	// Install security hooks only for the current IDE
+	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
+
+	// GitHub workflow is IDE-agnostic (CI/CD protection)
 	applied += await applyGitHubWorkflow(context, workspaceFolder, silent);
 
 	if (!silent && applied > 0) {
 		vscode.window.showInformationMessage(`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`);
 	}
 }
+
+// ─── SECURITY HOOKS INSTALLATION ──────────────────────────────────────────────
+
+async function applySecurityHooks(
+	context: vscode.ExtensionContext,
+	workspaceFolder: string,
+	targets: string[]
+): Promise<number> {
+	let count = 0;
+
+	for (const target of targets) {
+		switch (target) {
+			case 'kiro':
+				count += await installKiroHook(context, workspaceFolder);
+				break;
+			case 'claude':
+				count += await installClaudeHook(context, workspaceFolder);
+				break;
+			// Cursor and VS Code don't support preToolUse hooks natively
+		}
+	}
+
+	return count;
+}
+
+async function installKiroHook(context: vscode.ExtensionContext, workspaceFolder: string): Promise<number> {
+	const hooksDir = path.join(workspaceFolder, '.kiro', 'hooks');
+	const hookFile = path.join(hooksDir, 'appsec-gate.json');
+
+	// Don't overwrite if already exists
+	if (fs.existsSync(hookFile)) {
+		return 0;
+	}
+
+	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.json');
+	if (!fs.existsSync(sourceFile)) {
+		return 0;
+	}
+
+	if (!fs.existsSync(hooksDir)) {
+		fs.mkdirSync(hooksDir, { recursive: true });
+	}
+
+	fs.copyFileSync(sourceFile, hookFile);
+	return 1;
+}
+
+async function installClaudeHook(context: vscode.ExtensionContext, workspaceFolder: string): Promise<number> {
+	let count = 0;
+
+	// Install the gate script
+	const appsecDir = path.join(workspaceFolder, '.appsec');
+	const scriptDest = path.join(appsecDir, 'appsec-gate.sh');
+
+	if (!fs.existsSync(scriptDest)) {
+		const scriptSource = path.join(context.extensionPath, 'standards', 'hooks', 'appsec-gate.sh');
+		if (fs.existsSync(scriptSource)) {
+			if (!fs.existsSync(appsecDir)) {
+				fs.mkdirSync(appsecDir, { recursive: true });
+			}
+			fs.copyFileSync(scriptSource, scriptDest);
+			fs.chmodSync(scriptDest, 0o755);
+			count++;
+		}
+	}
+
+	// Install Claude Code hooks in .claude/settings.json
+	const claudeSettingsDir = path.join(workspaceFolder, '.claude');
+	const settingsFile = path.join(claudeSettingsDir, 'settings.json');
+
+	if (!fs.existsSync(settingsFile)) {
+		const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'claude', 'settings.json');
+		if (fs.existsSync(sourceFile)) {
+			if (!fs.existsSync(claudeSettingsDir)) {
+				fs.mkdirSync(claudeSettingsDir, { recursive: true });
+			}
+			fs.copyFileSync(sourceFile, settingsFile);
+			count++;
+		}
+	}
+
+	return count;
+}
+
+// ─── GITHUB WORKFLOW ──────────────────────────────────────────────────────────
 
 async function applyGitHubWorkflow(
 	context: vscode.ExtensionContext,

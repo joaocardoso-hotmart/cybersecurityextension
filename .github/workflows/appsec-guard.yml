@@ -158,48 +158,7 @@ jobs:
 
             if (changedFiles.length === 0) return;
 
-            const body = `## 🛡️ AppSec Rules Protection — Security Violation Detected
-
-            > **⛔ This PR modifies protected security steering files.**
-
-            ### 🚨 Protected files changed:
-
-            ${changedFiles.map(f => `- ❌ \`${f}\``).join('\n')}
-
-            ### 📋 Changes detected:
-
-            ${diffDetails}
-
-            ---
-
-            ### 🔒 Why this is blocked:
-
-            These files define **mandatory security policies** maintained by the **AppSec team**. They enforce:
-
-            - 🔐 Prevention of hardcoded credentials
-            - 🛡️ Secure-by-default AI code generation
-            - 🚫 Secret exposure protection
-            - 🔑 Strong authentication & cryptography standards
-            - 📦 Supply chain security controls
-
-            ### ✅ How to fix:
-
-            1. **Revert** all changes to the protected files:
-               \`\`\`bash
-               git checkout origin/${baseBranch} -- ${changedFiles.join(' ')}
-               git commit -m "revert: restore protected appsec steering files"
-               git push
-               \`\`\`
-
-            2. If you need to modify these files, **contact the AppSec team** with a business justification.
-
-            ---
-
-            > 📧 **Contact:** appsec@yourcompany.com
-            > 📖 **Policy:** Security steering files are immutable without AppSec team authorization.
-
-            ---
-            *🤖 This check is automated by the AppSec Rules Protection workflow.*`;
+            const body = `## 🛡️ AppSec Rules Protection — Security Violation Detected\n\n> **⛔ This PR modifies protected security steering files.**\n\n### 🚨 Protected files changed:\n\n${changedFiles.map(f => `- ❌ \`${f}\``).join('\n')}\n\n### 📋 Changes detected:\n\n${diffDetails}\n\n---\n\n### 🔒 Why this is blocked:\n\nThese files define **mandatory security policies** maintained by the **AppSec team**. They enforce:\n\n- 🔐 Prevention of hardcoded credentials\n- 🛡️ Secure-by-default AI code generation\n- 🚫 Secret exposure protection\n- 🔑 Strong authentication & cryptography standards\n- 📦 Supply chain security controls\n\n### ✅ How to fix:\n\n1. **Revert** all changes to the protected files:\n   \`\`\`bash\n   git checkout origin/${baseBranch} -- ${changedFiles.join(' ')}\n   git commit -m "revert: restore protected appsec steering files"\n   git push\n   \`\`\`\n\n2. If you need to modify these files, **contact the AppSec team** with a business justification.\n\n---\n\n> 📧 **Contact:** appsec@yourcompany.com\n> 📖 **Policy:** Security steering files are immutable without AppSec team authorization.\n\n---\n*🤖 This check is automated by the AppSec Rules Protection workflow.*`;
 
             await github.rest.issues.createComment({
               issue_number: context.issue.number,

@@ -21,7 +21,12 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			localResourceRoots: [this._extensionUri],
 		};
 
-		webviewView.webview.html = this._getEmptyHtml();
+		// If we already have findings, show them immediately
+		if (this._findings.length > 0) {
+			webviewView.webview.html = this._getHtmlForWebview();
+		} else {
+			webviewView.webview.html = this._getEmptyHtml();
+		}
 
 		webviewView.webview.onDidReceiveMessage(async (message) => {
 			switch (message.command) {
@@ -50,6 +55,13 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 						line: message.line,
 					}));
 					break;
+			}
+		});
+
+		// Re-render when the view becomes visible again
+		webviewView.onDidChangeVisibility(() => {
+			if (webviewView.visible && this._findings.length > 0) {
+				webviewView.webview.html = this._getHtmlForWebview();
 			}
 		});
 	}
