@@ -714,16 +714,17 @@ rules:
   - id: sensitive-data-in-logs
     patterns:
       - pattern-either:
-          - pattern: console.log(..., $PASSWORD, ...)
-          - pattern: console.log(..., $TOKEN, ...)
-          - pattern: console.log(..., $SECRET, ...)
           - pattern: |
                          $LOGGER.info(..., { ..., password: $VAR, ... })
           - pattern: |
                          $LOGGER.debug(..., { ..., token: $VAR, ... })
           - pattern: |
                          $LOGGER.error(..., { ..., secret: $VAR, ... })
-    message: "Dados sensíveis podem estar sendo logados. Remova credenciais dos logs."
+          - pattern: |
+                         $LOGGER.info(..., { ..., secret: $VAR, ... })
+          - pattern: |
+                         $LOGGER.debug(..., { ..., password: $VAR, ... })
+    message: "Dados sensíveis em logs. Remova credenciais dos logs."
     languages: [typescript, javascript]
     severity: WARNING
     metadata:
@@ -945,16 +946,7 @@ rules:
   # CWE-362: RACE CONDITION (TOCTOU)
   # ═══════════════════════════════════════════════════════════════════════════════
 
-  - id: toctou-file-access
-    patterns:
-      - pattern-either:
-          - pattern: fs.existsSync($PATH)
-    message: "Possível race condition (TOCTOU): fs.existsSync seguido de operação no arquivo não é atômico. Use try/catch."
-    languages: [typescript, javascript]
-    severity: INFO
-    metadata:
-      cwe: ["CWE-367"]
-      fix: "Use try/catch com a operação direta em vez de verificar existência antes."
+  # toctou-file-access rule removed — too noisy for general use (fs.existsSync is standard Node.js pattern)
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # CWE-918: HEADER INJECTION

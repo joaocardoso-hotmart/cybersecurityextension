@@ -1,10 +1,7 @@
 #!/bin/bash
 # AppSec Pre-Commit Hook
-# Behavior:
-#   1st commit attempt with findings: BLOCK + show findings + instruct to retry
-#   2nd commit attempt (retry): ALLOW with warning
-#
-# State is tracked via a timestamp file in .appsec-state/
+# 1st attempt with findings: BLOCK + show grouped table
+# 2nd attempt (retry within 60s): ALLOW with warning
 
 STATE_DIR=".appsec-state"
 BYPASS_FILE="$STATE_DIR/commit-bypass"
@@ -12,103 +9,115 @@ RULES_FILE="rules/security.yml"
 
 mkdir -p "$STATE_DIR"
 
-# Check if this is a retry (bypass file exists and is less than 60 seconds old)
+# Check retry
 if [ -f "$BYPASS_FILE" ]; then
   BYPASS_TIME=$(cat "$BYPASS_FILE")
   CURRENT_TIME=$(date +%s)
   DIFF=$((CURRENT_TIME - BYPASS_TIME))
-
-  # Allow if retry is within 60 seconds
   if [ "$DIFF" -lt 60 ]; then
-    echo ""
-    echo "⚠️  [AppSec] Prosseguindo com o commit após confirmação do desenvolvedor."
-    echo "   O código será analisado novamente na pipeline de CI/CD."
-    echo ""
+    printf "\n  ⚠️  Prosseguindo. O código será validado na pipeline.\n\n"
     rm -f "$BYPASS_FILE"
     exit 0
   fi
 fi
 
-# Get staged files that are code
+# Get staged code files
 STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
+[ -z "$STAGED_FILES" ] && exit 0
 
-if [ -z "$STAGED_FILES" ]; then
-  exit 0
-fi
-
-# Find the rules file (check multiple locations)
+# Find rules
 if [ ! -f "$RULES_FILE" ]; then
   GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
-  if [ -f "$GIT_ROOT/rules/security.yml" ]; then
-    RULES_FILE="$GIT_ROOT/rules/security.yml"
-  else
-    exit 0
-  fi
+  [ -f "$GIT_ROOT/rules/security.yml" ] && RULES_FILE="$GIT_ROOT/rules/security.yml" || exit 0
 fi
 
-# Check if opengrep is installed
-if ! command -v opengrep &> /dev/null; then
-  echo "⚠️  [AppSec] OpenGrep não instalado. Scan de segurança ignorado."
-  exit 0
-fi
+command -v opengrep &>/dev/null || exit 0
 
-# Run OpenGrep on staged files
-FILE_ARGS=""
-for f in $STAGED_FILES; do
-  FILE_ARGS="$FILE_ARGS $f"
-done
+# Run scan and pipe to python
+TMPFILE=$(mktemp)
+opengrep scan --json --quiet --config="$RULES_FILE" $STAGED_FILES > "$TMPFILE" 2>/dev/null
 
-OUTPUT=$(opengrep scan --json --quiet --config="$RULES_FILE" $FILE_ARGS 2>/dev/null)
+# Format output via python reading from temp file
+python3 - "$TMPFILE" << 'EOF'
+import sys, json, os
 
-# Check if there are findings
-FINDINGS_COUNT=0
-if [ -n "$OUTPUT" ]; then
-  FINDINGS_COUNT=$(echo "$OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('results',[])))" 2>/dev/null || echo "0")
-fi
-
-if [ "$FINDINGS_COUNT" -eq 0 ] || [ "$FINDINGS_COUNT" = "0" ]; then
-  rm -f "$BYPASS_FILE"
-  exit 0
-fi
-
-# Findings detected — BLOCK first attempt
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "   COMMIT BLOQUEADO — Vulnerabilidades de segurança detectadas"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "   Encontrei $FINDINGS_COUNT finding(s) de segurança nos arquivos staged:"
-echo ""
-
-# Show findings details
-echo "$OUTPUT" | python3 -c "
-import sys, json
+tmpfile = sys.argv[1]
 try:
-    d = json.load(sys.stdin)
-    for r in d.get('results', []):
-        f = r.get('path', '?')
-        line = r.get('start', {}).get('line', '?')
-        msg = r.get('extra', {}).get('message', r.get('check_id', '?'))
-        sev = r.get('extra', {}).get('severity', '?').upper()
-        print(f'   [{sev}] {f}:{line}')
-        print(f'         {msg[:80]}')
-        print()
+    with open(tmpfile) as f:
+        d = json.load(f)
+    results = d.get('results', [])
 except:
-    pass
-" 2>/dev/null
+    sys.exit(0)
+finally:
+    os.unlink(tmpfile)
 
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "   Para prosseguir mesmo assim, execute o commit novamente dentro de 60s:"
-echo ""
-echo "     git commit -m \"sua mensagem\""
-echo ""
-echo "   O código será analisado na pipeline e pode ser bloqueado no PR."
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
+if not results:
+    sys.exit(0)
 
-# Save bypass timestamp for retry
-date +%s > "$BYPASS_FILE"
+groups = {}
+for r in results:
+    rule = r.get('check_id', '?').split('.')[-1].replace('-', ' ').title()
+    sev = r.get('extra', {}).get('severity', 'INFO').upper()
+    f = r.get('path', '?')
+    key = (sev, rule)
+    if key not in groups:
+        groups[key] = {'count': 0, 'files': set()}
+    groups[key]['count'] += 1
+    groups[key]['files'].add(f)
 
-exit 1
+total = len(results)
+error_c = sum(1 for r in results if r.get('extra',{}).get('severity','').upper() == 'ERROR')
+warn_c = sum(1 for r in results if r.get('extra',{}).get('severity','').upper() == 'WARNING')
+info_c = total - error_c - warn_c
+
+R = '\033[31m'; Y = '\033[33m'; C = '\033[36m'; B = '\033[1m'; N = '\033[0m'; D = '\033[2m'
+
+print()
+print(f'  {B}{R}┌──────────────────────────────────────────────────────────────────┐{N}')
+print(f'  {B}{R}│  🚫 COMMIT BLOQUEADO — {total} vulnerabilidade(s) detectada(s)         │{N}')
+print(f'  {B}{R}└──────────────────────────────────────────────────────────────────┘{N}')
+print()
+
+parts = []
+if error_c: parts.append(f'{R}{B}{error_c} critical/high{N}')
+if warn_c: parts.append(f'{Y}{warn_c} medium{N}')
+if info_c: parts.append(f'{C}{info_c} low/info{N}')
+print(f'  {" · ".join(parts)}')
+print()
+
+print(f'  {D}{"─"*66}{N}')
+print(f'  {B} {"Sev":<9} {"Qtd":<5} {"Vulnerabilidade":<26} {"Arquivos"}{N}')
+print(f'  {D}{"─"*66}{N}')
+
+sev_order = {'ERROR': 0, 'WARNING': 1, 'INFO': 2}
+sev_icon = {'ERROR': f'{R}●{N}', 'WARNING': f'{Y}●{N}', 'INFO': f'{C}●{N}'}
+
+for (sev, rule), data in sorted(groups.items(), key=lambda x: sev_order.get(x[0][0], 3)):
+    icon = sev_icon.get(sev, '○')
+    files_str = ', '.join(sorted(data['files']))
+    if len(files_str) > 20:
+        files_str = files_str[:17] + '...'
+    if len(rule) > 24:
+        rule = rule[:21] + '...'
+    print(f'  {icon} {sev:<8} {data["count"]:<5} {rule:<26} {D}{files_str}{N}')
+
+print(f'  {D}{"─"*66}{N}')
+print()
+print(f'  {D}Para prosseguir, execute o commit novamente dentro de 60s.{N}')
+print(f'  {D}O código será validado na pipeline de CI/CD.{N}')
+print()
+
+sys.exit(1)
+EOF
+
+EXIT_CODE=$?
+
+if [ "$EXIT_CODE" -eq 1 ]; then
+  date +%s > "$BYPASS_FILE"
+  exit 1
+fi
+
+# Clean up tmpfile if python didn't
+[ -f "$TMPFILE" ] && rm -f "$TMPFILE"
+
+exit 0
