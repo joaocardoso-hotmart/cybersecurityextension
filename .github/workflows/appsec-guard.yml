@@ -3,13 +3,6 @@ name: "🛡️ AppSec Rules Protection"
 on:
   pull_request:
     branches: [main, master, develop]
-    paths:
-      - "**/appsec-rules.md"
-      - "**/appsec-rules.mdc"
-      - ".kiro/steering/appsec-rules.md"
-      - ".claude/rules/appsec-rules.md"
-      - ".cursor/rules/appsec-rules.mdc"
-      - ".vscode/steering/appsec-rules.md"
 
 permissions:
   contents: read
@@ -38,7 +31,7 @@ jobs:
             ".kiro/steering/appsec-rules.md"
             ".claude/rules/appsec-rules.md"
             ".cursor/rules/appsec-rules.mdc"
-            ".vscode/steering/appsec-rules.md"
+            ".github/copilot-instructions.md"
           )
 
           CHANGED_FILES=""
@@ -90,13 +83,6 @@ jobs:
             echo "  These files are PROTECTED by the AppSec team and define"
             echo "  mandatory security policies for AI-assisted development."
             echo ""
-            echo "  🔹 These rules were carefully crafted to prevent:"
-            echo "     • Hardcoded credentials in source code"
-            echo "     • Insecure code generation by AI assistants"
-            echo "     • Secret exposure in logs, tests, and configs"
-            echo "     • Weak cryptography and authentication bypasses"
-            echo "     • Supply chain and infrastructure vulnerabilities"
-            echo ""
             echo "  🔹 What you need to do:"
             echo "     1. Revert ALL changes to the protected files listed above"
             echo "     2. Run: git checkout origin/${{ github.base_ref }} -- <file>"
@@ -108,8 +94,6 @@ jobs:
             echo "     • Wait for explicit approval before modifying"
             echo ""
             echo "  📧 Contact: appsec@yourcompany.com"
-            echo "  📖 Policy: Security steering files are immutable without"
-            echo "     AppSec team authorization."
             echo ""
             echo "╔══════════════════════════════════════════════════════════════╗"
             echo "║  ❌  THIS PR CANNOT BE MERGED — SECURITY VIOLATION         ║"
@@ -136,7 +120,7 @@ jobs:
               '.kiro/steering/appsec-rules.md',
               '.claude/rules/appsec-rules.md',
               '.cursor/rules/appsec-rules.mdc',
-              '.vscode/steering/appsec-rules.md'
+              '.github/copilot-instructions.md'
             ];
 
             const baseBranch = context.payload.pull_request.base.ref;
@@ -158,48 +142,7 @@ jobs:
 
             if (changedFiles.length === 0) return;
 
-            const body = `## 🛡️ AppSec Rules Protection — Security Violation Detected
-
-            > **⛔ This PR modifies protected security steering files.**
-
-            ### 🚨 Protected files changed:
-
-            ${changedFiles.map(f => `- ❌ \`${f}\``).join('\n')}
-
-            ### 📋 Changes detected:
-
-            ${diffDetails}
-
-            ---
-
-            ### 🔒 Why this is blocked:
-
-            These files define **mandatory security policies** maintained by the **AppSec team**. They enforce:
-
-            - 🔐 Prevention of hardcoded credentials
-            - 🛡️ Secure-by-default AI code generation
-            - 🚫 Secret exposure protection
-            - 🔑 Strong authentication & cryptography standards
-            - 📦 Supply chain security controls
-
-            ### ✅ How to fix:
-
-            1. **Revert** all changes to the protected files:
-               \`\`\`bash
-               git checkout origin/${baseBranch} -- ${changedFiles.join(' ')}
-               git commit -m "revert: restore protected appsec steering files"
-               git push
-               \`\`\`
-
-            2. If you need to modify these files, **contact the AppSec team** with a business justification.
-
-            ---
-
-            > 📧 **Contact:** appsec@yourcompany.com
-            > 📖 **Policy:** Security steering files are immutable without AppSec team authorization.
-
-            ---
-            *🤖 This check is automated by the AppSec Rules Protection workflow.*`;
+            const body = `## 🛡️ AppSec Rules Protection — Security Violation Detected\n\n> **⛔ This PR modifies protected security steering files.**\n\n### 🚨 Protected files changed:\n\n${changedFiles.map(f => `- ❌ \`${f}\``).join('\n')}\n\n### 📋 Changes detected:\n\n${diffDetails}\n\n---\n\n### 🔒 Why this is blocked:\n\nThese files define **mandatory security policies** maintained by the **AppSec team**.\n\n### ✅ How to fix:\n\n1. **Revert** all changes to the protected files:\n   \`\`\`bash\n   git checkout origin/${baseBranch} -- ${changedFiles.join(' ')}\n   git commit -m "revert: restore protected appsec steering files"\n   git push\n   \`\`\`\n\n2. If you need to modify these files, **contact the AppSec team** with a business justification.\n\n---\n*🤖 This check is automated by the AppSec Rules Protection workflow.*`;
 
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -207,3 +150,144 @@ jobs:
               repo: context.repo.repo,
               body: body
             });
+
+  hook-integrity:
+    name: "🪝 Pre-Commit Hook Integrity Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: "🪝 Verify pre-commit hook integrity"
+        id: hook-check
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  🪝 Pre-Commit Hook Integrity Check                        ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          HOOK_FILE=".appsec/appsec-gate.sh"
+          HAS_ISSUE="false"
+          ISSUE_TYPE=""
+
+          # Check if hook file exists
+          if [ ! -f "$HOOK_FILE" ]; then
+            HAS_ISSUE="true"
+            ISSUE_TYPE="deleted"
+            echo "  ❌ Hook file not found: $HOOK_FILE"
+          else
+            # Check if hook was modified in this PR
+            if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${HOOK_FILE}$"; then
+              HAS_ISSUE="true"
+              ISSUE_TYPE="modified"
+              echo "  ⚠️  Hook file was modified in this PR"
+              echo ""
+              echo "  Changes:"
+              git diff origin/${{ github.base_ref }}...HEAD -- "$HOOK_FILE" || true
+            fi
+
+            # Check if hook is executable
+            if [ ! -x "$HOOK_FILE" ]; then
+              HAS_ISSUE="true"
+              ISSUE_TYPE="disabled"
+              echo "  ⚠️  Hook file is not executable (disabled)"
+            fi
+          fi
+
+          # Also check if .appsec-state/dismissed.json was tampered
+          DISMISSED_FILE=".appsec-state/dismissed.json"
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${DISMISSED_FILE}$"; then
+            # Check if ALL findings were dismissed (suspicious bulk dismiss)
+            if [ -f "$DISMISSED_FILE" ]; then
+              DISMISSED_COUNT=$(python3 -c "import json; d=json.load(open('$DISMISSED_FILE')); print(len(d))" 2>/dev/null || echo "0")
+              if [ "$DISMISSED_COUNT" -gt 20 ]; then
+                echo ""
+                echo "  ⚠️  Suspicious: $DISMISSED_COUNT findings dismissed in bulk"
+              fi
+            fi
+          fi
+
+          echo "has_issue=${HAS_ISSUE}" >> $GITHUB_OUTPUT
+          echo "issue_type=${ISSUE_TYPE}" >> $GITHUB_OUTPUT
+
+          if [ "$HAS_ISSUE" = "true" ]; then
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  ⛔ HOOK INTEGRITY VIOLATION                                 │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+
+            if [ "$ISSUE_TYPE" = "deleted" ]; then
+              echo "  O hook de segurança (.appsec/appsec-gate.sh) foi removido."
+              echo ""
+              echo "  👉 Ative o hook para prosseguir com a PR."
+              echo ""
+              echo "  Para restaurar:"
+              echo "    git checkout origin/${{ github.base_ref }} -- .appsec/appsec-gate.sh"
+              echo "    git commit -m 'fix: restore appsec hook'"
+              echo "    git push"
+            elif [ "$ISSUE_TYPE" = "modified" ]; then
+              echo "  O hook de segurança (.appsec/appsec-gate.sh) foi alterado."
+              echo ""
+              echo "  👉 Volte o hook ao original para prosseguir com a PR."
+              echo ""
+              echo "  Para restaurar:"
+              echo "    git checkout origin/${{ github.base_ref }} -- .appsec/appsec-gate.sh"
+              echo "    git commit -m 'fix: restore appsec hook'"
+              echo "    git push"
+            elif [ "$ISSUE_TYPE" = "disabled" ]; then
+              echo "  O hook de segurança (.appsec/appsec-gate.sh) foi desativado"
+              echo "  (permissão de execução removida)."
+              echo ""
+              echo "  👉 Ative o hook para prosseguir com a PR."
+              echo ""
+              echo "  Para restaurar:"
+              echo "    chmod +x .appsec/appsec-gate.sh"
+              echo "    git add .appsec/appsec-gate.sh"
+              echo "    git commit -m 'fix: restore appsec hook permissions'"
+              echo "    git push"
+            fi
+
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║  ❌  THIS PR CANNOT BE MERGED — HOOK VIOLATION             ║"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            exit 1
+          else
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  ✅ Pre-commit hook is intact and active                     │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+          fi
+
+      - name: "💬 Comment on PR about hook violation"
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const issueType = '${{ steps.hook-check.outputs.issue_type }}';
+            const baseBranch = context.payload.pull_request.base.ref;
+
+            let message = '';
+            if (issueType === 'deleted') {
+              message = `## 🪝 Hook de Segurança Removido\n\n> **⛔ O hook de segurança (\`.appsec/appsec-gate.sh\`) foi removido nesta PR.**\n\n### 👉 Ative o hook para prosseguir com a PR.\n\nPara restaurar:\n\`\`\`bash\ngit checkout origin/${baseBranch} -- .appsec/appsec-gate.sh\ngit commit -m "fix: restore appsec hook"\ngit push\n\`\`\`\n\n---\n*🤖 Verificação automática do AppSec.*`;
+            } else if (issueType === 'modified') {
+              message = `## 🪝 Hook de Segurança Alterado\n\n> **⛔ O hook de segurança (\`.appsec/appsec-gate.sh\`) foi modificado nesta PR.**\n\n### 👉 Volte o hook ao original para prosseguir com a PR.\n\nPara restaurar:\n\`\`\`bash\ngit checkout origin/${baseBranch} -- .appsec/appsec-gate.sh\ngit commit -m "fix: restore appsec hook"\ngit push\n\`\`\`\n\n---\n*🤖 Verificação automática do AppSec.*`;
+            } else if (issueType === 'disabled') {
+              message = `## 🪝 Hook de Segurança Desativado\n\n> **⛔ O hook de segurança (\`.appsec/appsec-gate.sh\`) teve suas permissões removidas.**\n\n### 👉 Ative o hook para prosseguir com a PR.\n\nPara restaurar:\n\`\`\`bash\nchmod +x .appsec/appsec-gate.sh\ngit add .appsec/appsec-gate.sh\ngit commit -m "fix: restore appsec hook permissions"\ngit push\n\`\`\`\n\n---\n*🤖 Verificação automática do AppSec.*`;
+            }
+
+            if (message) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: message
+              });
+            }

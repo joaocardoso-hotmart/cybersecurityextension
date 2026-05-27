@@ -13,7 +13,7 @@
   "exclude": [
     "node_modules",
     ".vscode-test",
-    "test-vuln-app.ts",
-    "test-vulnerabilities.js"
+    "test-vulnerabilities.ts",
+    "teste.js"
   ]
 }
