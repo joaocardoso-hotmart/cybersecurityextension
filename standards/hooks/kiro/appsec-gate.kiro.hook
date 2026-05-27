@@ -1,7 +1,8 @@
 {
+  "enabled": true,
   "name": "AppSec Gate — Prompt Analysis",
-  "version": "1.0.0",
   "description": "Analisa o prompt do desenvolvedor quando ele envia uma mensagem. Se o pedido solicitar implementação insegura, bloqueia e sugere alternativa segura. Dispara apenas uma vez por mensagem.",
+  "version": "1",
   "when": {
     "type": "promptSubmit"
   },

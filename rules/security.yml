@@ -233,14 +233,14 @@ rules:
           - pattern: new Function("..." + $VAR)
           - pattern: |
               new Function(`...${$VAR}...`)
-          - pattern: setTimeout($VAR, ...)
-          - pattern: setInterval($VAR, ...)
+          - pattern: setTimeout("...", ...)
+          - pattern: setInterval("...", ...)
     message: "Execução dinâmica de código (eval/Function/setTimeout com string). Risco de code injection."
     languages: [typescript, javascript]
     severity: ERROR
     metadata:
       cwe: ["CWE-95"]
-      fix: "Evite eval() e new Function(). Use alternativas seguras como JSON.parse() ou AST parsers."
+      fix: "Evite eval() e new Function(). Use alternativas seguras como JSON.parse() ou AST parsers. Para setTimeout/setInterval, passe uma função em vez de string."
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # CWE-79: CROSS-SITE SCRIPTING (XSS) (Comprehensive)

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "command": "bash .appsec/appsec-gate.sh"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "bash .appsec/appsec-gate.sh"
+      }
+    ]
+  }
+}

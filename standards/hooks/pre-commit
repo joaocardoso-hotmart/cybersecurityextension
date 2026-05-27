@@ -2,9 +2,11 @@
 # AppSec Pre-Commit Hook
 # 1st attempt with findings: BLOCK + show grouped table
 # 2nd attempt (retry within 60s): ALLOW with warning
+# Respects dismissed findings from .appsec-state/dismissed.json
 
 STATE_DIR=".appsec-state"
 BYPASS_FILE="$STATE_DIR/commit-bypass"
+DISMISSED_FILE="$STATE_DIR/dismissed.json"
 RULES_FILE="rules/security.yml"
 
 mkdir -p "$STATE_DIR"
@@ -38,10 +40,12 @@ TMPFILE=$(mktemp)
 opengrep scan --json --quiet --config="$RULES_FILE" $STAGED_FILES > "$TMPFILE" 2>/dev/null
 
 # Format output via python reading from temp file
-python3 - "$TMPFILE" << 'EOF'
+python3 - "$TMPFILE" "$DISMISSED_FILE" << 'EOF'
 import sys, json, os
 
 tmpfile = sys.argv[1]
+dismissed_file = sys.argv[2] if len(sys.argv) > 2 else None
+
 try:
     with open(tmpfile) as f:
         d = json.load(f)
@@ -50,6 +54,35 @@ except:
     sys.exit(0)
 finally:
     os.unlink(tmpfile)
+
+if not results:
+    sys.exit(0)
+
+# Load dismissed findings
+dismissed = []
+if dismissed_file and os.path.exists(dismissed_file):
+    try:
+        with open(dismissed_file) as f:
+            dismissed = json.load(f)
+    except:
+        dismissed = []
+
+# Filter out dismissed findings
+if dismissed:
+    dismissed_set = set()
+    for d_item in dismissed:
+        # Match by rule id and file
+        key = (d_item.get('id', ''), d_item.get('file', ''))
+        dismissed_set.add(key)
+
+    filtered_results = []
+    for r in results:
+        rule_id = r.get('check_id', '').split('.')[-1]
+        file_path = r.get('path', '')
+        if (rule_id, file_path) not in dismissed_set:
+            filtered_results.append(r)
+
+    results = filtered_results
 
 if not results:
     sys.exit(0)

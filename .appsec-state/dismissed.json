@@ -1,0 +1,14 @@
+[
+  {
+    "id": "Users.guilherme.monte..kiro.extensions.hotmartcybersecurity.cybersecurityextension-0.6.1.rules.command-injection-eval",
+    "file": "src/extension.ts",
+    "line": 797,
+    "dismissedAt": "2026-05-27T18:26:56.321Z"
+  },
+  {
+    "id": "Users.guilherme.monte..kiro.extensions.hotmartcybersecurity.cybersecurityextension-0.6.1.rules.command-injection-eval",
+    "file": "src/extension.ts",
+    "line": 826,
+    "dismissedAt": "2026-05-27T18:27:35.407Z"
+  }
+]
