@@ -785,10 +785,10 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 	}
 
 	// Capture the current index mtime at activation so we don't trigger on reload
-	let lastIndexSize = 0;
+	let lastIndexMtime = 0;
 	try {
 		const stat = fs.statSync(path.join(gitDir, 'index'));
-		lastIndexSize = stat.size;
+		lastIndexMtime = stat.mtimeMs;
 	} catch { /* */ }
 
 	// Grace period: ignore all events in the first 5 seconds after activation
@@ -798,34 +798,43 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 
 	let debounceTimer: NodeJS.Timeout | undefined;
 
-	const watcher = fs.watch(gitDir, (eventType, filename) => {
-		if (!filename) { return; }
-		if (!ready) { return; }
-
-		// Only trigger on index (git add) or COMMIT_EDITMSG (git commit)
-		if (filename !== 'index' && filename !== 'COMMIT_EDITMSG') {
-			return;
-		}
-
-		// For index changes, verify the file size actually changed
-		// (a real git add modifies the index size; git status reads don't)
-		if (filename === 'index') {
-			try {
-				const stat = fs.statSync(path.join(gitDir, 'index'));
-				if (stat.size === lastIndexSize) {
-					return;
-				}
-				lastIndexSize = stat.size;
-			} catch { return; }
-		}
-
-		// Debounce to batch rapid git operations
+	const triggerScan = () => {
 		if (debounceTimer) {
 			clearTimeout(debounceTimer);
 		}
 		debounceTimer = setTimeout(() => {
 			onGitOperation(sidebarProvider);
-		}, 2000);
+		}, 1200);
+	};
+
+	const watcher = fs.watch(gitDir, (eventType, filename) => {
+		if (!filename) { return; }
+		if (!ready) { return; }
+
+		// Trigger on:
+		//   - index            → git add / git reset (staging changes)
+		//   - index.lock        → git is mid-write of the index (covers fast `git add`)
+		//   - COMMIT_EDITMSG    → git commit
+		if (filename !== 'index' && filename !== 'index.lock' && filename !== 'COMMIT_EDITMSG') {
+			return;
+		}
+
+		// For index changes, confirm the index was actually rewritten by comparing the
+		// modification time (always advances on a real write — unlike the byte size, which
+		// frequently stays identical when re-staging the same file).
+		if (filename === 'index') {
+			try {
+				const stat = fs.statSync(path.join(gitDir, 'index'));
+				if (stat.mtimeMs === lastIndexMtime) {
+					return;
+				}
+				lastIndexMtime = stat.mtimeMs;
+			} catch {
+				// index momentarily missing during the lock→index rename; let the scan run anyway
+			}
+		}
+
+		triggerScan();
 	});
 
 	context.subscriptions.push({
@@ -908,9 +917,15 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 	// GitHub workflow is IDE-agnostic (CI/CD protection)
 	applied += await applyGitHubWorkflow(context, workspaceFolder);
 
-	vscode.window.showInformationMessage(
-		`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`
-	);
+	if (applied > 0) {
+		vscode.window.showInformationMessage(
+			`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`
+		);
+	} else {
+		vscode.window.showInformationMessage(
+			`✅ Padrões de segurança já estão sincronizados para ${currentIde}. Nenhuma alteração necessária.`
+		);
+	}
 }
 
 async function updateStandards(context: vscode.ExtensionContext): Promise<void> {

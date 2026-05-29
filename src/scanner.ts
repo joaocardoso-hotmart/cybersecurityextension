@@ -52,11 +52,23 @@ const EXCLUDED_PATHS = [
 	/^node_modules\//,
 	/^out\//,
 	/^dist\//,
+	/^build\//,
 	/^vendor\//,
 	/^target\//,
+	/^\.terraform\//,
 	/\.min\.js$/,
 	/\.bundle\.js$/,
 	/\.lock$/,
+	/package-lock\.json$/,
+	/yarn\.lock$/,
+	/pnpm-lock\.yaml$/,
+	/Cargo\.lock$/,
+	/Gemfile\.lock$/,
+	/composer\.lock$/,
+	/poetry\.lock$/,
+	/^tsconfig.*\.json$/,
+	/^\.eslintrc.*\.json$/,
+	/^\.prettierrc.*$/,
 	/^CLAUDE\.md$/,
 	/^README/i,
 	/^CHANGELOG/i,
@@ -103,7 +115,12 @@ function getChangedFiles(workspaceFolder: string): string[] {
 	// Filter out excluded files and non-code files
 	return Array.from(files).filter(f => {
 		if (isExcludedFile(f)) { return false; }
-		return /\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala|Dockerfile)$/i.test(f);
+		// Source code: ts, tsx, js, jsx, java, kotlin, python, go, ruby, php, c/cpp, c#,
+		// swift, rust, scala. Plus IaC/config: terraform, yaml, json, dockerfile.
+		return /\.(ts|tsx|js|jsx|mjs|cjs|java|kt|kts|py|pyi|go|rb|erb|rake|php|phtml|c|h|cpp|cc|cxx|hpp|cs|swift|rs|scala|sc|tf|tfvars|hcl|ya?ml|json)$/i.test(f)
+			|| /(^|\/)Dockerfile(\..+)?$/i.test(f)
+			|| /(^|\/)Gemfile$/i.test(f)
+			|| /(^|\/)Rakefile$/i.test(f);
 	});
 }
 

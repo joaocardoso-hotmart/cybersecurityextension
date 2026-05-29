@@ -54,9 +54,12 @@ rules:
   - id: aws-key-pattern-const
     patterns:
       - pattern-either:
-          - pattern: const $VAR = "AKIA..."
-          - pattern: let $VAR = "AKIA..."
-          - pattern: var $VAR = "AKIA..."
+          - pattern: const $VAR = "$VAL"
+          - pattern: let $VAR = "$VAL"
+          - pattern: var $VAR = "$VAL"
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^AKIA[0-9A-Z]{16}$
     message: "AWS Access Key ID detectada (padrão AKIA*). Remova do código imediatamente."
     languages: [typescript, javascript]
     severity: ERROR
@@ -67,24 +70,12 @@ rules:
   - id: generic-api-key-value
     patterns:
       - pattern-either:
-          - pattern: const $VAR = "sk-..."
-          - pattern: let $VAR = "sk-..."
-          - pattern: const $VAR = "sk_live_..."
-          - pattern: let $VAR = "sk_live_..."
-          - pattern: const $VAR = "sk_test_..."
-          - pattern: let $VAR = "sk_test_..."
-          - pattern: const $VAR = "pk_live_..."
-          - pattern: let $VAR = "pk_live_..."
-          - pattern: const $VAR = "ghp_..."
-          - pattern: let $VAR = "ghp_..."
-          - pattern: const $VAR = "gho_..."
-          - pattern: let $VAR = "gho_..."
-          - pattern: const $VAR = "xoxb-..."
-          - pattern: let $VAR = "xoxb-..."
-          - pattern: const $VAR = "xoxp-..."
-          - pattern: let $VAR = "xoxp-..."
-          - pattern: const $VAR = "SG...."
-          - pattern: let $VAR = "SG...."
+          - pattern: const $VAR = "$VAL"
+          - pattern: let $VAR = "$VAL"
+          - pattern: var $VAR = "$VAL"
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^(sk-[A-Za-z0-9_\-]{20,}|sk_live_[A-Za-z0-9]{20,}|sk_test_[A-Za-z0-9]{20,}|pk_live_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|gho_[A-Za-z0-9]{30,}|ghs_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9\-]{10,}|SG\.[A-Za-z0-9_\-\.]{20,}|AIza[A-Za-z0-9_\-]{30,}|EAA[A-Za-z0-9]{20,}|hf_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_\-]{20,})$
     message: "Token/API key com prefixo conhecido detectado no código. Use variáveis de ambiente."
     languages: [typescript, javascript]
     severity: ERROR
@@ -95,28 +86,34 @@ rules:
   - id: connection-string-hardcoded
     patterns:
       - pattern-either:
-          - pattern: const $VAR = "mongodb://..."
-          - pattern: let $VAR = "mongodb://..."
-          - pattern: const $VAR = "mongodb+srv://..."
-          - pattern: let $VAR = "mongodb+srv://..."
-          - pattern: const $VAR = "postgres://..."
-          - pattern: let $VAR = "postgres://..."
-          - pattern: const $VAR = "postgresql://..."
-          - pattern: let $VAR = "postgresql://..."
-          - pattern: const $VAR = "mysql://..."
-          - pattern: let $VAR = "mysql://..."
-          - pattern: const $VAR = "redis://..."
-          - pattern: let $VAR = "redis://..."
-          - pattern: const $VAR = "amqp://..."
-          - pattern: let $VAR = "amqp://..."
-          - pattern: const $VAR = "mssql://..."
-          - pattern: let $VAR = "mssql://..."
-    message: "Connection string hardcoded com possíveis credenciais. Use variáveis de ambiente."
+          - pattern: const $VAR = "$VAL"
+          - pattern: let $VAR = "$VAL"
+          - pattern: var $VAR = "$VAL"
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^(mongodb(\+srv)?|postgres(ql)?|mysql|mariadb|redis|rediss|amqp|amqps|mssql|jdbc:[a-z]+):\/\/[^\/\s:]+:[^@\s]+@.+
+    message: "Connection string hardcoded com credenciais embutidas. Use variáveis de ambiente."
     languages: [typescript, javascript]
     severity: ERROR
     metadata:
       cwe: ["CWE-798"]
       fix: "Use process.env.DATABASE_URL ou equivalente."
+
+  - id: connection-string-in-string-literal
+    patterns:
+      - pattern: "$VAL"
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^(mongodb(\+srv)?|postgres(ql)?|mysql|mariadb|redis|rediss|amqp|amqps|mssql):\/\/[^\/\s:]+:[^@\s]+@.+
+      - pattern-not-inside: const $X = "..."
+      - pattern-not-inside: let $X = "..."
+      - pattern-not-inside: var $X = "..."
+    message: "String literal contém connection string com credenciais embutidas. Use variáveis de ambiente."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Mova a connection string para process.env e nunca exponha credenciais no código."
 
   # ═══════════════════════════════════════════════════════════════════════════════
   # CWE-89: SQL INJECTION (Comprehensive)
@@ -207,6 +204,20 @@ rules:
     metadata:
       cwe: ["CWE-78"]
       fix: "Use child_process.execFile(cmd, [arg1, arg2]) em vez de exec com interpolação."
+
+  - id: command-injection-exec-variable
+    patterns:
+      - pattern-either:
+          - pattern: exec($CMD, ...)
+          - pattern: execSync($CMD, ...)
+      - pattern-not: exec("...", ...)
+      - pattern-not: execSync("...", ...)
+    message: "Command Injection: exec/execSync chamado com variável. Se essa variável contém input do usuário, há risco de injeção de comandos."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      fix: "Use child_process.execFile(cmd, [arg1, arg2]) em vez de exec com variável. Nunca construa comandos shell com input do usuário."
 
   - id: command-injection-spawn-shell
     patterns:
@@ -627,11 +638,25 @@ rules:
   - id: insecure-http-url
     patterns:
       - pattern-either:
-          - pattern: const $VAR = "http://..."
-          - pattern: let $VAR = "http://..."
-          - pattern: fetch("http://...")
-          - pattern: axios.get("http://...")
-          - pattern: axios.post("http://...", ...)
+          - patterns:
+              - pattern-either:
+                  - pattern: const $VAR = "$VAL"
+                  - pattern: let $VAR = "$VAL"
+                  - pattern: var $VAR = "$VAL"
+              - metavariable-regex:
+                  metavariable: $VAL
+                  regex: ^http:\/\/(?!localhost|127\.0\.0\.1|0\.0\.0\.0).+
+          - patterns:
+              - pattern-either:
+                  - pattern: fetch("$VAL")
+                  - pattern: axios.get("$VAL")
+                  - pattern: axios.post("$VAL", ...)
+                  - pattern: axios.put("$VAL", ...)
+                  - pattern: axios.delete("$VAL")
+                  - pattern: axios("$VAL")
+              - metavariable-regex:
+                  metavariable: $VAL
+                  regex: ^http:\/\/(?!localhost|127\.0\.0\.1|0\.0\.0\.0).+
     message: "URL HTTP sem criptografia. Use HTTPS para proteger dados em trânsito."
     languages: [typescript, javascript]
     severity: WARNING
@@ -965,3 +990,1008 @@ rules:
     metadata:
       cwe: ["CWE-113"]
       fix: "Valide e sanitize o input antes de usar em headers. Remova caracteres \\r\\n."
+
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #                              PYTHON
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: py-insecure-deserialization-pickle
+    patterns:
+      - pattern-either:
+          - pattern: pickle.loads(...)
+          - pattern: pickle.load(...)
+          - pattern: cPickle.loads(...)
+          - pattern: cPickle.load(...)
+          - pattern: _pickle.loads(...)
+          - pattern: shelve.open(...)
+          - pattern: marshal.loads(...)
+          - pattern: dill.loads(...)
+    message: "Desserialização insegura: pickle/marshal/dill aceitam código arbitrário. Nunca use com dados não confiáveis."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-502"]
+      fix: "Use json.loads() para dados externos. Se precisar de objetos complexos, valide com pydantic/marshmallow."
+
+  - id: py-yaml-unsafe-load
+    patterns:
+      - pattern-either:
+          - pattern: yaml.load($DATA)
+          - pattern: yaml.load($DATA, Loader=yaml.Loader)
+          - pattern: yaml.load($DATA, Loader=yaml.FullLoader)
+    message: "yaml.load com Loader inseguro permite execução de código arbitrário. Use yaml.safe_load()."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-502"]
+      fix: "Use yaml.safe_load(data) ou yaml.load(data, Loader=yaml.SafeLoader)."
+
+  - id: py-eval-exec
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+          - pattern: compile(..., ..., "exec")
+    message: "Execução dinâmica de código (eval/exec). Risco crítico de code injection."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-95"]
+      fix: "Evite eval/exec. Use ast.literal_eval() para parsing seguro de literais."
+
+  - id: py-command-injection
+    patterns:
+      - pattern-either:
+          - pattern: os.system($CMD)
+          - pattern: os.popen($CMD)
+          - pattern: subprocess.call($CMD, shell=True)
+          - pattern: subprocess.run($CMD, shell=True)
+          - pattern: subprocess.Popen($CMD, shell=True)
+          - pattern: subprocess.check_call($CMD, shell=True)
+          - pattern: subprocess.check_output($CMD, shell=True)
+          - pattern: subprocess.getoutput($CMD)
+          - pattern: subprocess.getstatusoutput($CMD)
+          - pattern: commands.getoutput($CMD)
+    message: "Command Injection: shell=True ou os.system com input variável. Use lista de argumentos sem shell."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      fix: "Use subprocess.run([cmd, arg1, arg2], shell=False) com lista de argumentos."
+
+  - id: py-sql-injection-format
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute("..." % $VAR)
+          - pattern: $CURSOR.execute("...".format(...))
+          - pattern: $CURSOR.execute(f"...{$VAR}...")
+          - pattern: $CURSOR.execute("..." + $VAR + "...")
+          - pattern: $CURSOR.execute("..." + $VAR)
+          - pattern: $CURSOR.executemany("..." % $VAR)
+          - pattern: $CURSOR.executemany(f"...{$VAR}...")
+    message: "SQL Injection via formatação de string. Use parameterized queries."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Use cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))."
+
+  - id: py-weak-crypto
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+          - pattern: hashlib.new("md5", ...)
+          - pattern: hashlib.new("sha1", ...)
+          - pattern: hashlib.new("md4", ...)
+          - pattern: Crypto.Hash.MD5.new(...)
+          - pattern: Crypto.Hash.SHA1.new(...)
+    message: "Hash criptográfico fraco (MD5/SHA1). Use SHA-256+ ou bcrypt/argon2 para senhas."
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-327"]
+      fix: "Use hashlib.sha256() ou bcrypt/argon2 para senhas."
+
+  - id: py-weak-cipher
+    patterns:
+      - pattern-either:
+          - pattern: Crypto.Cipher.DES.new(...)
+          - pattern: Crypto.Cipher.DES3.new(...)
+          - pattern: Crypto.Cipher.ARC4.new(...)
+          - pattern: Crypto.Cipher.ARC2.new(...)
+          - pattern: Crypto.Cipher.Blowfish.new(...)
+          - pattern: cryptography.hazmat.primitives.ciphers.algorithms.TripleDES(...)
+          - pattern: cryptography.hazmat.primitives.ciphers.algorithms.ARC4(...)
+          - pattern: cryptography.hazmat.primitives.ciphers.algorithms.Blowfish(...)
+    message: "Algoritmo de cifra fraco/obsoleto. Use AES-GCM ou ChaCha20-Poly1305."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-327"]
+
+  - id: py-weak-random
+    patterns:
+      - pattern-either:
+          - pattern: random.random()
+          - pattern: random.randint(...)
+          - pattern: random.choice(...)
+          - pattern: random.randrange(...)
+          - pattern: random.uniform(...)
+          - pattern: random.sample(...)
+    message: "random é determinístico e não é criptograficamente seguro. Use secrets para tokens/IDs sensíveis."
+    languages: [python]
+    severity: INFO
+    metadata:
+      cwe: ["CWE-338"]
+      fix: "Use secrets.token_urlsafe() ou secrets.choice() para valores sensíveis."
+
+  - id: py-flask-debug-true
+    patterns:
+      - pattern-either:
+          - pattern: $APP.run(..., debug=True, ...)
+          - pattern: app.config["DEBUG"] = True
+          - pattern: app.debug = True
+    message: "Flask debug=True em produção expõe console interativo e RCE via Werkzeug."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-489"]
+      fix: "Use debug=os.environ.get('FLASK_DEBUG') == '1' e nunca True hardcoded."
+
+  - id: py-django-debug-true
+    pattern: DEBUG = True
+    message: "Django DEBUG=True em produção expõe stack traces e dados sensíveis."
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-489"]
+
+  - id: py-ssrf-requests
+    patterns:
+      - pattern-either:
+          - pattern: requests.get($URL, ...)
+          - pattern: requests.post($URL, ...)
+          - pattern: requests.put($URL, ...)
+          - pattern: requests.delete($URL, ...)
+          - pattern: requests.request($METHOD, $URL, ...)
+          - pattern: urllib.request.urlopen($URL)
+          - pattern: urllib.urlopen($URL)
+          - pattern: httpx.get($URL, ...)
+      - pattern-not: requests.get("...", ...)
+      - pattern-not: requests.post("...", ...)
+      - pattern-not: requests.put("...", ...)
+      - pattern-not: requests.delete("...", ...)
+      - pattern-not: urllib.request.urlopen("...")
+      - pattern-not: httpx.get("...", ...)
+    message: "Possível SSRF: URL construída a partir de variável. Valide contra allowlist."
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-918"]
+
+  - id: py-tls-verify-disabled
+    patterns:
+      - pattern-either:
+          - pattern: requests.get(..., verify=False, ...)
+          - pattern: requests.post(..., verify=False, ...)
+          - pattern: requests.put(..., verify=False, ...)
+          - pattern: requests.delete(..., verify=False, ...)
+          - pattern: requests.request(..., verify=False, ...)
+          - pattern: ssl._create_unverified_context()
+          - pattern: ssl.create_default_context(..., check_hostname=False, ...)
+    message: "Verificação TLS desabilitada permite ataques MITM."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-295"]
+      fix: "Remova verify=False. Use certificados válidos."
+
+  - id: py-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = "$VAL"
+          - pattern: $OBJ.$FIELD = "$VAL"
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(password|passwd|pwd|secret|api_key|apikey|api_token|private_key|access_key|secret_key|token|auth_token|jwt_secret|aws_secret|aws_access_key|client_secret|encryption_key|signing_key|db_password|senha|chave_secreta)$
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^[A-Za-z0-9_\-/+=]{8,}$
+    message: "Credencial hardcoded em variável Python. Use os.environ ou secret manager."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: py-path-traversal
+    patterns:
+      - pattern-either:
+          - pattern: open(os.path.join($BASE, $REQ.$PROP), ...)
+          - pattern: open(os.path.join($BASE, request.$PROP[$KEY]), ...)
+          - pattern: open(f"...{request.$PROP}...", ...)
+    message: "Path Traversal: input do usuário usado em caminho de arquivo sem validação."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-22"]
+
+  - id: py-jinja2-autoescape-off
+    patterns:
+      - pattern-either:
+          - pattern: jinja2.Environment(autoescape=False, ...)
+          - pattern: jinja2.Environment()
+          - pattern: Environment(autoescape=False, ...)
+    message: "Jinja2 sem autoescape facilita XSS. Habilite autoescape=True."
+    languages: [python]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-79"]
+      fix: "Use jinja2.Environment(autoescape=True) ou autoescape=select_autoescape()."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #                              JAVA / KOTLIN
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: java-sql-injection-concat
+    patterns:
+      - pattern-either:
+          - pattern: $STMT.executeQuery("..." + $VAR + "...")
+          - pattern: $STMT.executeQuery("..." + $VAR)
+          - pattern: $STMT.executeUpdate("..." + $VAR + "...")
+          - pattern: $STMT.execute("..." + $VAR + "...")
+          - pattern: $JDBC.createStatement(...)
+    message: "SQL Injection via concatenação. Use PreparedStatement com parâmetros (?)."
+    languages: [java]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "PreparedStatement ps = conn.prepareStatement(\"SELECT * FROM users WHERE id = ?\"); ps.setInt(1, userId);"
+
+  - id: java-command-injection
+    patterns:
+      - pattern-either:
+          - pattern: Runtime.getRuntime().exec($CMD)
+          - pattern: new ProcessBuilder($CMD).start()
+      - pattern-not: Runtime.getRuntime().exec("...")
+    message: "Command Injection: Runtime.exec/ProcessBuilder com input dinâmico."
+    languages: [java]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      fix: "Use ProcessBuilder com lista de argumentos: new ProcessBuilder(Arrays.asList(\"cmd\", arg))."
+
+  - id: java-insecure-deserialization
+    patterns:
+      - pattern-either:
+          - pattern: new ObjectInputStream($STREAM).readObject()
+          - pattern: $XSTREAM.fromXML($DATA)
+          - pattern: SerializationUtils.deserialize($DATA)
+    message: "Desserialização insegura permite RCE. Valide a classe ou use formatos seguros (JSON com Jackson)."
+    languages: [java]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-502"]
+
+  - id: java-weak-crypto
+    patterns:
+      - pattern-either:
+          - pattern: MessageDigest.getInstance("MD5")
+          - pattern: MessageDigest.getInstance("SHA-1")
+          - pattern: MessageDigest.getInstance("SHA1")
+          - pattern: MessageDigest.getInstance("MD4")
+          - pattern: Cipher.getInstance("DES")
+          - pattern: Cipher.getInstance("DES/...")
+          - pattern: Cipher.getInstance("DESede")
+          - pattern: Cipher.getInstance("RC4")
+          - pattern: Cipher.getInstance("AES")
+          - pattern: Cipher.getInstance("AES/ECB/...")
+    message: "Algoritmo criptográfico fraco/inseguro. Use SHA-256+ ou AES/GCM/NoPadding."
+    languages: [java]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-327"]
+
+  - id: java-weak-random
+    patterns:
+      - pattern-either:
+          - pattern: new Random()
+          - pattern: Math.random()
+    message: "java.util.Random é previsível. Use SecureRandom para tokens/IDs sensíveis."
+    languages: [java]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-338"]
+      fix: "Use new SecureRandom() em vez de new Random()."
+
+  - id: java-xxe-vulnerable
+    patterns:
+      - pattern-either:
+          - pattern: DocumentBuilderFactory.newInstance()
+          - pattern: SAXParserFactory.newInstance()
+          - pattern: XMLInputFactory.newInstance()
+          - pattern: TransformerFactory.newInstance()
+    message: "Parser XML pode ser vulnerável a XXE. Desabilite DTD e entidades externas."
+    languages: [java]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-611"]
+      fix: "factory.setFeature(\"http://apache.org/xml/features/disallow-doctype-decl\", true);"
+
+  - id: java-trust-all-certs
+    patterns:
+      - pattern-either:
+          - pattern: |
+              new X509TrustManager() {
+                public void checkClientTrusted(...) {}
+                public void checkServerTrusted(...) {}
+                public X509Certificate[] getAcceptedIssuers() { return null; }
+              }
+          - pattern: HttpsURLConnection.setDefaultHostnameVerifier((hostname, session) -> true)
+    message: "TrustManager/HostnameVerifier que aceita qualquer certificado: MITM trivial."
+    languages: [java]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-295"]
+
+  - id: java-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: String $VAR = "$VAL";
+          - pattern: private String $VAR = "$VAL";
+          - pattern: public static final String $VAR = "$VAL";
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|pwd|secret|apikey|api_key|token|privatekey|private_key|accesskey|access_key|secretkey|secret_key|jwtsecret|jwt_secret|senha|chave)
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^[A-Za-z0-9_\-/+=]{8,}$
+    message: "Credencial hardcoded em variável Java. Use variáveis de ambiente ou Vault."
+    languages: [java]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: java-spring-csrf-disabled
+    pattern: $HTTP.csrf().disable()
+    message: "CSRF desabilitado no Spring Security. Mantenha CSRF ativo para formulários."
+    languages: [java]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-352"]
+
+  - id: kotlin-command-injection
+    patterns:
+      - pattern-either:
+          - pattern: Runtime.getRuntime().exec($CMD)
+          - pattern: ProcessBuilder($CMD).start()
+      - pattern-not: Runtime.getRuntime().exec("...")
+    message: "Command Injection em Kotlin. Use lista de argumentos."
+    languages: [kotlin]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+
+  - id: kotlin-sql-injection
+    patterns:
+      - pattern-either:
+          - pattern: $STMT.executeQuery("..." + $VAR + "...")
+          - pattern: $STMT.executeQuery("$...$VAR...")
+    message: "SQL Injection em Kotlin. Use prepared statements."
+    languages: [kotlin]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+
+  - id: kotlin-weak-crypto
+    patterns:
+      - pattern-either:
+          - pattern: MessageDigest.getInstance("MD5")
+          - pattern: MessageDigest.getInstance("SHA-1")
+          - pattern: Cipher.getInstance("DES")
+          - pattern: Cipher.getInstance("AES/ECB/...")
+    message: "Hash/cifra fraca. Use SHA-256+ e AES/GCM."
+    languages: [kotlin]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-327"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #                                  GO
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: go-sql-injection
+    patterns:
+      - pattern-either:
+          - pattern: $DB.Query(fmt.Sprintf("...", $VAR))
+          - pattern: $DB.QueryRow(fmt.Sprintf("...", $VAR))
+          - pattern: $DB.Exec(fmt.Sprintf("...", $VAR))
+          - pattern: $DB.Query("..." + $VAR + "...")
+          - pattern: $DB.Query("..." + $VAR)
+    message: "SQL Injection em Go. Use placeholders ($1, ?) e parâmetros."
+    languages: [go]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "db.Query(\"SELECT * FROM users WHERE id = $1\", userId)"
+
+  - id: go-command-injection
+    patterns:
+      - pattern-either:
+          - pattern: exec.Command("sh", "-c", $CMD)
+          - pattern: exec.Command("bash", "-c", $CMD)
+          - pattern: exec.CommandContext($CTX, "sh", "-c", $CMD)
+    message: "Command Injection: shell -c com input dinâmico."
+    languages: [go]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      fix: "Use exec.Command(\"binary\", arg1, arg2) sem shell."
+
+  - id: go-weak-crypto
+    patterns:
+      - pattern-either:
+          - pattern: md5.New()
+          - pattern: md5.Sum(...)
+          - pattern: sha1.New()
+          - pattern: sha1.Sum(...)
+          - pattern: des.NewCipher(...)
+          - pattern: rc4.NewCipher(...)
+    message: "Hash/cifra fraca em Go. Use sha256/sha512 ou AES-GCM."
+    languages: [go]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-327"]
+
+  - id: go-weak-random
+    patterns:
+      - pattern-either:
+          - pattern: math/rand.Intn(...)
+          - pattern: math/rand.Int()
+          - pattern: math/rand.Float64()
+          - pattern: rand.Intn(...)
+    message: "math/rand não é seguro. Use crypto/rand para valores sensíveis."
+    languages: [go]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-338"]
+
+  - id: go-tls-insecure-skip-verify
+    pattern: |
+      tls.Config{..., InsecureSkipVerify: true, ...}
+    message: "InsecureSkipVerify=true desativa validação de certificado. Risco de MITM."
+    languages: [go]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-295"]
+
+  - id: go-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: $VAR := "$VAL"
+          - pattern: var $VAR = "$VAL"
+          - pattern: const $VAR = "$VAL"
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(password|passwd|pwd|secret|apiKey|api_key|token|privateKey|private_key|accessKey|access_key|secretKey|secret_key|jwtSecret|senha|chave)$
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^[A-Za-z0-9_\-/+=]{8,}$
+    message: "Credencial hardcoded em Go. Use os.Getenv ou um secret manager."
+    languages: [go]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: go-ssrf
+    patterns:
+      - pattern-either:
+          - pattern: http.Get($URL)
+          - pattern: http.Post($URL, ..., ...)
+          - pattern: http.NewRequest(..., $URL, ...)
+      - pattern-not: http.Get("...")
+      - pattern-not: http.Post("...", ..., ...)
+    message: "Possível SSRF em Go. Valide a URL contra allowlist."
+    languages: [go]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-918"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #                                 RUBY
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: ruby-sql-injection
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL.where("...#{$VAR}...")
+          - pattern: $MODEL.where("..." + $VAR)
+          - pattern: $MODEL.find_by_sql("...#{$VAR}...")
+          - pattern: ActiveRecord::Base.connection.execute("...#{$VAR}...")
+    message: "SQL Injection em Ruby/Rails. Use placeholders (?) com parâmetros."
+    languages: [ruby]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Model.where(\"id = ?\", user_id)"
+
+  - id: ruby-command-injection
+    patterns:
+      - pattern-either:
+          - pattern: system("...#{$VAR}...")
+          - pattern: "`...#{$VAR}...`"
+          - pattern: "%x{...#{$VAR}...}"
+          - pattern: Open3.popen3("...#{$VAR}...")
+          - pattern: Kernel.exec("...#{$VAR}...")
+          - pattern: IO.popen("...#{$VAR}...")
+    message: "Command Injection em Ruby. Use array de argumentos."
+    languages: [ruby]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      fix: "system('cmd', arg1, arg2) ou Open3.capture3('cmd', arg)."
+
+  - id: ruby-eval
+    patterns:
+      - pattern-either:
+          - pattern: eval($VAR)
+          - pattern: instance_eval($VAR)
+          - pattern: class_eval($VAR)
+          - pattern: module_eval($VAR)
+          - pattern: send($VAR, ...)
+    message: "Execução dinâmica de código (eval/send com variável)."
+    languages: [ruby]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-95"]
+
+  - id: ruby-yaml-load
+    pattern: YAML.load($DATA)
+    message: "YAML.load aceita objetos serializados arbitrários (RCE). Use YAML.safe_load."
+    languages: [ruby]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-502"]
+
+  - id: ruby-weak-crypto
+    patterns:
+      - pattern-either:
+          - pattern: Digest::MD5.hexdigest(...)
+          - pattern: Digest::MD5.digest(...)
+          - pattern: Digest::SHA1.hexdigest(...)
+          - pattern: Digest::SHA1.digest(...)
+          - pattern: OpenSSL::Cipher.new("DES")
+          - pattern: OpenSSL::Cipher.new("RC4")
+    message: "Hash/cifra fraca em Ruby. Use SHA-256+ ou AES-256-GCM."
+    languages: [ruby]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-327"]
+
+  - id: ruby-mass-assignment
+    patterns:
+      - pattern-either:
+          - pattern: $MODEL.new(params[$KEY])
+          - pattern: $MODEL.create(params[$KEY])
+          - pattern: $MODEL.update_attributes(params[$KEY])
+    message: "Mass assignment com params direto. Use strong parameters (params.require(...).permit(...))."
+    languages: [ruby]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-915"]
+
+  - id: ruby-hardcoded-secret
+    patterns:
+      - pattern: $VAR = "$VAL"
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(@?(password|passwd|pwd|secret|api_key|apikey|token|private_key|access_key|secret_key|jwt_secret|senha|chave))$
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^[A-Za-z0-9_\-/+=]{8,}$
+    message: "Credencial hardcoded em Ruby. Use ENV ou Rails credentials."
+    languages: [ruby]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #                                 PHP
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: php-sql-injection
+    patterns:
+      - pattern-either:
+          - pattern: mysql_query("...$VAR...")
+          - pattern: mysql_query("..." . $VAR)
+          - pattern: mysqli_query($CONN, "...$VAR...")
+          - pattern: $PDO->query("...$VAR...")
+          - pattern: $PDO->exec("...$VAR...")
+    message: "SQL Injection em PHP. Use prepared statements (PDO::prepare ou mysqli_prepare)."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "$stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id'); $stmt->execute(['id' => $id]);"
+
+  - id: php-command-injection
+    patterns:
+      - pattern-either:
+          - pattern: system($VAR)
+          - pattern: exec($VAR)
+          - pattern: shell_exec($VAR)
+          - pattern: passthru($VAR)
+          - pattern: popen($VAR, ...)
+          - pattern: proc_open($VAR, ..., ...)
+          - pattern: "`$VAR`"
+      - pattern-not: system("...")
+      - pattern-not: exec("...")
+      - pattern-not: shell_exec("...")
+    message: "Command Injection em PHP. Sanitize com escapeshellarg() ou evite shell."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+      fix: "Use escapeshellarg() em cada argumento ou prefira chamadas sem shell."
+
+  - id: php-eval
+    patterns:
+      - pattern-either:
+          - pattern: eval($VAR)
+          - pattern: eval("...$VAR...")
+          - pattern: assert($VAR)
+          - pattern: create_function(..., $VAR)
+    message: "eval/assert/create_function com input dinâmico = RCE."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-95"]
+
+  - id: php-unserialize
+    pattern: unserialize($VAR)
+    message: "unserialize() em dados não confiáveis pode levar a RCE via gadget chains."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-502"]
+      fix: "Use json_decode() ou unserialize com allowed_classes restrito."
+
+  - id: php-file-inclusion
+    patterns:
+      - pattern-either:
+          - pattern: include $VAR
+          - pattern: include_once $VAR
+          - pattern: require $VAR
+          - pattern: require_once $VAR
+      - pattern-not: include "..."
+      - pattern-not: include_once "..."
+      - pattern-not: require "..."
+      - pattern-not: require_once "..."
+    message: "LFI/RFI: include/require com variável. Restrinja paths a uma allowlist."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-98"]
+
+  - id: php-weak-crypto
+    patterns:
+      - pattern-either:
+          - pattern: md5($VAR)
+          - pattern: sha1($VAR)
+          - pattern: hash("md5", $VAR)
+          - pattern: hash("sha1", $VAR)
+          - pattern: crypt($VAR)
+    message: "Hash fraco em PHP. Use password_hash() para senhas e hash('sha256', ...) para integridade."
+    languages: [php]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-327"]
+
+  - id: php-xss-echo
+    patterns:
+      - pattern-either:
+          - pattern-regex: \becho\s+\$_GET\[
+          - pattern-regex: \becho\s+\$_POST\[
+          - pattern-regex: \becho\s+\$_REQUEST\[
+          - pattern-regex: \bprint\s+\$_GET\[
+          - pattern-regex: \bprint\s+\$_POST\[
+    message: "XSS: input do usuário ecoado sem escape. Use htmlspecialchars()."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-79"]
+      fix: "echo htmlspecialchars($_GET['name'], ENT_QUOTES, 'UTF-8');"
+
+  - id: php-hardcoded-secret
+    patterns:
+      - pattern: $$VAR = "$VAL";
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(password|passwd|pwd|secret|api_key|apikey|token|private_key|access_key|secret_key|jwt_secret|senha|chave)$
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^[A-Za-z0-9_\-/+=]{8,}$
+    message: "Credencial hardcoded em PHP. Use variáveis de ambiente ou .env."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #                                SCALA
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: scala-sql-injection
+    patterns:
+      - pattern-either:
+          - pattern: $DB.run(sql"...$VAR...")
+          - pattern: $STMT.executeQuery("..." + $VAR + "...")
+          - pattern: $STMT.executeUpdate("..." + $VAR + "...")
+    message: "SQL Injection em Scala. Use Slick com bind parameters ou Anorm interpolators seguros."
+    languages: [scala]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+
+  - id: scala-command-injection
+    patterns:
+      - pattern-either:
+          - pattern: Runtime.getRuntime().exec($CMD)
+          - pattern: $CMD.!
+          - pattern: $CMD.!!
+      - pattern-not: Runtime.getRuntime().exec("...")
+    message: "Command Injection em Scala (Runtime.exec ou sys.process)."
+    languages: [scala]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-78"]
+
+  - id: scala-weak-crypto
+    patterns:
+      - pattern-either:
+          - pattern: MessageDigest.getInstance("MD5")
+          - pattern: MessageDigest.getInstance("SHA-1")
+          - pattern: Cipher.getInstance("DES")
+          - pattern: Cipher.getInstance("AES/ECB/...")
+    message: "Hash/cifra fraca em Scala."
+    languages: [scala]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-327"]
+
+  - id: scala-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: val $VAR = "$VAL"
+          - pattern: var $VAR = "$VAL"
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)^(password|passwd|pwd|secret|apiKey|api_key|token|privateKey|private_key|accessKey|access_key|secretKey|secret_key|jwtSecret|senha|chave)$
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^[A-Za-z0-9_\-/+=]{8,}$
+    message: "Credencial hardcoded em Scala. Use ConfigFactory + variáveis de ambiente."
+    languages: [scala]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #                              TERRAFORM
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: tf-s3-public-acl
+    patterns:
+      - pattern-either:
+          - pattern: |
+              resource "aws_s3_bucket" $NAME {
+                ...
+                acl = "public-read"
+                ...
+              }
+          - pattern: |
+              resource "aws_s3_bucket" $NAME {
+                ...
+                acl = "public-read-write"
+                ...
+              }
+          - pattern: |
+              resource "aws_s3_bucket_acl" $NAME {
+                ...
+                acl = "public-read"
+                ...
+              }
+          - pattern: |
+              resource "aws_s3_bucket_acl" $NAME {
+                ...
+                acl = "public-read-write"
+                ...
+              }
+    message: "Bucket S3 com ACL pública. Dados podem ser acessados por qualquer um na internet."
+    languages: [hcl]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-732"]
+
+  - id: tf-security-group-open-to-world
+    patterns:
+      - pattern-either:
+          - pattern: |
+              ingress {
+                ...
+                cidr_blocks = ["0.0.0.0/0"]
+                ...
+                from_port = 22
+                ...
+              }
+          - pattern: |
+              ingress {
+                ...
+                cidr_blocks = ["0.0.0.0/0"]
+                ...
+                from_port = 3389
+                ...
+              }
+          - pattern: |
+              ingress {
+                ...
+                cidr_blocks = ["0.0.0.0/0"]
+                ...
+                from_port = 3306
+                ...
+              }
+          - pattern: |
+              ingress {
+                ...
+                cidr_blocks = ["0.0.0.0/0"]
+                ...
+                from_port = 5432
+                ...
+              }
+          - pattern: |
+              ingress {
+                ...
+                cidr_blocks = ["0.0.0.0/0"]
+                ...
+                from_port = 27017
+                ...
+              }
+          - pattern: |
+              ingress {
+                ...
+                cidr_blocks = ["0.0.0.0/0"]
+                ...
+                from_port = 6379
+                ...
+              }
+    message: "Security group expondo porta sensível (SSH/RDP/DB) para 0.0.0.0/0. Restrinja a CIDRs específicos."
+    languages: [hcl]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-284"]
+
+  - id: tf-rds-publicly-accessible
+    pattern: |
+      resource "aws_db_instance" $NAME {
+        ...
+        publicly_accessible = true
+        ...
+      }
+    message: "RDS publicly_accessible=true expõe banco à internet. Use subnets privadas."
+    languages: [hcl]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-284"]
+
+  - id: tf-rds-no-encryption
+    pattern: |
+      resource "aws_db_instance" $NAME {
+        ...
+        storage_encrypted = false
+        ...
+      }
+    message: "RDS storage_encrypted=false. Habilite encryption-at-rest."
+    languages: [hcl]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-311"]
+
+  - id: tf-s3-no-encryption
+    pattern: |
+      resource "aws_s3_bucket" $NAME {
+        ...
+      }
+    message: "Bucket S3 sem server_side_encryption_configuration. Habilite SSE-S3 ou SSE-KMS."
+    languages: [hcl]
+    severity: INFO
+    metadata:
+      cwe: ["CWE-311"]
+
+  - id: tf-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: $KEY = "$VAL"
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: (?i)^(password|passwd|secret|api_key|access_key|secret_key|private_key|token|aws_access_key_id|aws_secret_access_key)$
+      - metavariable-regex:
+          metavariable: $VAL
+          regex: ^[A-Za-z0-9_\-/+=]{8,}$
+    message: "Credencial hardcoded em Terraform. Use variáveis (var.) ou data source de secret manager."
+    languages: [hcl]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: tf-iam-policy-wildcard
+    patterns:
+      - pattern-either:
+          - pattern: |
+              {
+                "Effect": "Allow",
+                "Action": "*",
+                "Resource": "*"
+              }
+          - pattern: |
+              {
+                "Effect": "Allow",
+                "Action": ["*"],
+                "Resource": ["*"]
+              }
+    message: "Policy IAM com Action:* e Resource:* concede privilégios totais. Aplique princípio do menor privilégio."
+    languages: [json]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-732"]
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  #                          YAML / JSON / DOCKERFILE (genéricos)
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: yaml-hardcoded-secret
+    patterns:
+      - pattern-regex: (?i)^\s*(password|passwd|secret|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|token|aws[_-]?(access|secret)[_-]?key|jwt[_-]?secret|client[_-]?secret|db[_-]?password|senha|chave[_-]?secreta)\s*:\s*["']?[A-Za-z0-9_\-/+=]{8,}["']?\s*$
+      - pattern-not-regex: (?i):\s*["']?(\{\{.*\}\}|\$\{.*\}|<.*>|changeme|example|your.*here|placeholder|todo|fixme|null|~|true|false)["']?\s*$
+    message: "Possível credencial hardcoded em arquivo YAML. Use referências a secret manager ou variáveis."
+    languages: [yaml]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: json-hardcoded-secret
+    patterns:
+      - pattern-regex: (?i)"(password|passwd|secret|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|token|aws[_-]?(access|secret)[_-]?key|jwt[_-]?secret|client[_-]?secret|db[_-]?password|senha|chave[_-]?secreta)"\s*:\s*"[A-Za-z0-9_\-/+=]{8,}"
+      - pattern-not-regex: (?i):\s*"(\{\{.*\}\}|\$\{.*\}|<.*>|changeme|example|your.*here|placeholder|todo|fixme)"
+    message: "Possível credencial hardcoded em arquivo JSON. Use variáveis de ambiente ou secret manager."
+    languages: [json]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: yaml-aws-key
+    pattern-regex: \bAKIA[0-9A-Z]{16}\b
+    message: "AWS Access Key ID hardcoded em YAML. Remova imediatamente e rotacione a chave."
+    languages: [yaml]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: json-aws-key
+    pattern-regex: \bAKIA[0-9A-Z]{16}\b
+    message: "AWS Access Key ID hardcoded em JSON. Remova imediatamente e rotacione a chave."
+    languages: [json]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+
+  - id: dockerfile-run-as-root
+    pattern-regex: (?im)^(RUN|CMD|ENTRYPOINT)\s+
+    message: "Dockerfile com instruções de execução: confirme que existe um USER não-root antes para reduzir privilégios."
+    languages: [generic]
+    paths:
+      include:
+        - "*Dockerfile*"
+    severity: INFO
+    metadata:
+      cwe: ["CWE-250"]
