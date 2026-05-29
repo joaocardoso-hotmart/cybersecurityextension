@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 import { SecurityFinding, Severity, sortBySeverity } from './scanner';
 
 /**
@@ -136,32 +137,34 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 	const findings: SecurityFinding[] = [];
 
 	try {
-		// Build file arguments
+		// Build absolute file paths (passed as separate argv entries — no shell interpolation,
+		// so filenames with parentheses, spaces or other special chars work correctly).
 		const filePaths = files.map(f => path.join(workspaceFolder, f));
-		const fileArgs = filePaths.join(' ');
 
 		// Use local rules bundled with the extension
 		let rulesPath = path.join(extensionPath, 'rules', 'security.yml');
 
 		// Fallback: look for rules in workspace (for development)
-		if (!require('fs').existsSync(rulesPath)) {
+		if (!fs.existsSync(rulesPath)) {
 			const workspaceRules = path.join(workspaceFolder, 'rules', 'security.yml');
-			if (require('fs').existsSync(workspaceRules)) {
+			if (fs.existsSync(workspaceRules)) {
 				rulesPath = workspaceRules;
 			}
 		}
 
-		if (!require('fs').existsSync(rulesPath)) {
+		if (!fs.existsSync(rulesPath)) {
 			vscode.window.showErrorMessage('🛡️ Arquivo de regras de segurança não encontrado.');
 			return findings;
 		}
 
-		// Run opengrep with local rules (no internet needed)
-		const cmd = `opengrep scan --json --quiet --config=${rulesPath} ${fileArgs}`;
+		// Run opengrep with local rules (no internet needed).
+		// Use execFileSync with argv array so paths with parentheses/spaces are passed
+		// safely without going through a shell.
+		const args = ['scan', '--json', '--quiet', `--config=${rulesPath}`, ...filePaths];
 
 		let output: string;
 		try {
-			output = execSync(cmd, {
+			output = execFileSync('opengrep', args, {
 				cwd: workspaceFolder,
 				encoding: 'utf-8',
 				maxBuffer: 50 * 1024 * 1024,
@@ -171,9 +174,10 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 		} catch (execErr: unknown) {
 			// OpenGrep returns exit code 1 when findings exist — parse stdout
 			if (execErr && typeof execErr === 'object' && 'stdout' in execErr) {
-				output = (execErr as { stdout: string }).stdout || '';
+				const stdout = (execErr as { stdout: Buffer | string }).stdout;
+				output = typeof stdout === 'string' ? stdout : (stdout?.toString('utf-8') || '');
 			} else {
-				console.log('OpenGrep execution error:', execErr);
+				console.error('OpenGrep execution error:', execErr);
 				return findings;
 			}
 		}

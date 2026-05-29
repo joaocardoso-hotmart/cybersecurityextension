@@ -17,3 +17,6 @@ CLAUDE.md
 teste.js
 .appsec-state/**
 lelele.js
+TestePy.py
+*.vsix
+.tmp-rule-tests/**

@@ -10,10 +10,11 @@
     "strict": true,
     "rootDir": "src"
   },
+  "include": [
+    "src/**/*"
+  ],
   "exclude": [
     "node_modules",
-    ".vscode-test",
-    "test-vulnerabilities.ts",
-    "teste.js"
+    ".vscode-test"
   ]
 }
