@@ -21,7 +21,7 @@ def carregar_perfil():
         # pickle.loads() nunca deve ser usado com dados que podem ter sido alterados pelo usuário.
         perfil = pickle.loads(dados_serializados)
         
-        return f"Bem-vindo de volt, {perfil.get('nome', 'Usuário')}!"
+        return f"Bem-vindo de volta, {perfil.get('nome', 'Usuário')}!"
         
     except Exception as e:
         # Retornar o erro exato não é uma boa prática, mas comum em códigos vulneráveis
