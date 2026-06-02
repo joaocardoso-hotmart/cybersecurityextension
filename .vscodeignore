@@ -20,3 +20,4 @@ lelele.js
 TestePy.py
 *.vsix
 .tmp-rule-tests/**
+scripts/**
