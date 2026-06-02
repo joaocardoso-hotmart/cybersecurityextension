@@ -18,6 +18,9 @@ teste.js
 .appsec-state/**
 lelele.js
 TestePy.py
+PyhtonTeste.py
+**/testepy.py
+Apresentacao.py
 *.vsix
 .tmp-rule-tests/**
 scripts/**
