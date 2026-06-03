@@ -10,5 +10,11 @@
     "file": "src/extension.ts",
     "line": 826,
     "dismissedAt": "2026-05-27T18:27:35.407Z"
+  },
+  {
+    "id": "Users.guilherme.monte..kiro.extensions.hotmartcybersecurity.cybersecurityextension-0.6.9.rules.py-insecure-deserialization-pickle",
+    "file": ".appsec-state/PyhtonTeste.py",
+    "line": 22,
+    "dismissedAt": "2026-06-02T18:44:05.537Z"
   }
 ]
