@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  AppSec Watchdog — LaunchDaemon (macOS)
+
+  Deploy via MDM:
+    1. Copy to /Library/LaunchDaemons/com.hotmart.appsec.watchdog.plist
+    2. Set permissions: chmod 644, chown root:wheel
+    3. Load: launchctl load /Library/LaunchDaemons/com.hotmart.appsec.watchdog.plist
+
+  Runs mdm-watchdog.sh every 30 minutes as root.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hotmart.appsec.watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Library/Application Support/Hotmart/appsec/mdm-watchdog.sh</string>
+  </array>
+
+  <!-- Run every 30 minutes -->
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <!-- Also run immediately at load -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- Do not restart — fire-and-forget -->
+  <key>KeepAlive</key>
+  <false/>
+
+  <!-- Low CPU priority: 0=default, 9=low, 19=background -->
+  <key>Nice</key>
+  <integer>19</integer>
+
+  <!-- Background IO class — won't compete with IDE disk access -->
+  <key>IOSchedulingClass</key>
+  <integer>0</integer>
+
+  <!-- Kill after 5 minutes if still running (safety valve) -->
+  <key>TimeOut</key>
+  <integer>300</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Library/Logs/Hotmart/appsec-watchdog.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/Hotmart/appsec-watchdog.log</string>
+
+  <!-- Run as root so it can write to /Library and manage system files -->
+  <key>UserName</key>
+  <string>root</string>
+</dict>
+</plist>

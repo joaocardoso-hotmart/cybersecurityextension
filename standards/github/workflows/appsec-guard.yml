@@ -291,3 +291,153 @@ jobs:
                 body: message
               });
             }
+
+  sast-scan:
+    name: "🔍 SAST — OpenGrep Security Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Install OpenGrep
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: "🔍 Run SAST scan on changed files"
+        id: scan
+        run: |
+          RULES_FILE="rules/security.yml"
+          DISMISSED_FILE=".appsec-state/dismissed.json"
+
+          if [ ! -f "$RULES_FILE" ]; then
+            echo "Rules file not found — skipping"
+            exit 0
+          fi
+
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -iE '\.(ts|tsx|js|jsx|mjs|cjs|java|kt|kts|py|pyi|go|rb|php|c|h|cpp|cs|swift|rs|scala)$' || true)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No code files changed."
+            exit 0
+          fi
+
+          echo "Scanning $(echo "$CHANGED_FILES" | wc -l | tr -d ' ') file(s)..."
+
+          TMPFILE=$(mktemp)
+          opengrep scan --json --quiet --config="$RULES_FILE" $CHANGED_FILES > "$TMPFILE" 2>/dev/null || true
+
+          python3 -c "
+          import sys, json, os
+
+          tmpfile, dismissed_file = '$TMPFILE', '$DISMISSED_FILE'
+
+          try:
+              with open(tmpfile) as f: data = json.load(f)
+              results = data.get('results', [])
+          except: sys.exit(0)
+          finally:
+              os.path.exists(tmpfile) and os.unlink(tmpfile)
+
+          if not results:
+              print('No security findings.'); sys.exit(0)
+
+          dismissed_keys = set()
+          if os.path.exists(dismissed_file):
+              try:
+                  for d in json.load(open(dismissed_file)):
+                      rid = d.get('id','')
+                      rn = rid.split('.rules.')[-1] if '.rules.' in rid else rid.split('.')[-1]
+                      dismissed_keys.update([(rn, d.get('file',''), d.get('line',0)), (rn, d.get('file',''), 0)])
+              except: pass
+
+          if dismissed_keys:
+              filtered = []
+              for r in results:
+                  cid = r.get('check_id','')
+                  rn = cid.split('.rules.')[-1] if '.rules.' in cid else cid.split('.')[-1]
+                  fp, ln = r.get('path',''), r.get('start',{}).get('line',0)
+                  if (rn, fp, ln) not in dismissed_keys and (rn, fp, 0) not in dismissed_keys:
+                      filtered.append(r)
+              results = filtered
+
+          if not results:
+              print('All findings dismissed as false positives.'); sys.exit(0)
+
+          with open('sast-findings.json', 'w') as f:
+              json.dump(results, f)
+
+          total = len(results)
+          errors = sum(1 for r in results if r.get('extra',{}).get('severity','').upper() == 'ERROR')
+          print(f'SAST FAILED: {total} finding(s) detected ({errors} critical/high)')
+          for r in results:
+              sev = r.get('extra',{}).get('severity','INFO').upper()
+              rule = r.get('check_id','?').split('.')[-1][:30]
+              f = r.get('path','?')
+              ln = r.get('start',{}).get('line','?')
+              print(f'  {sev:<8} {rule:<30} {f} L{ln}')
+          sys.exit(1 if errors > 0 else 0)
+          "
+
+      - name: "💬 Comment findings on PR"
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+
+            let findings = [];
+            try {
+              findings = JSON.parse(fs.readFileSync('sast-findings.json', 'utf-8'));
+            } catch (e) { return; }
+
+            if (findings.length === 0) return;
+
+            const total = findings.length;
+            const errors = findings.filter(f => (f.extra?.severity || '').toUpperCase() === 'ERROR').length;
+            const warnings = findings.filter(f => (f.extra?.severity || '').toUpperCase() === 'WARNING').length;
+            const infos = total - errors - warnings;
+
+            let summary = [];
+            if (errors) summary.push(`🔴 ${errors} critical/high`);
+            if (warnings) summary.push(`🟡 ${warnings} medium`);
+            if (infos) summary.push(`🔵 ${infos} low/info`);
+
+            let table = '| Severity | Rule | File | Line |\n|---|---|---|---|\n';
+            for (const f of findings) {
+              const sev = (f.extra?.severity || 'INFO').toUpperCase();
+              const icon = sev === 'ERROR' ? '🔴' : sev === 'WARNING' ? '🟡' : '🔵';
+              const rule = (f.check_id || '?').split('.').pop().replace(/-/g, ' ');
+              const file = f.path || '?';
+              const line = f.start?.line || '?';
+              table += `| ${icon} ${sev} | ${rule} | \`${file}\` | L${line} |\n`;
+            }
+
+            const body = `## 🔍 SAST Scan — ${total} Vulnerabilidade(s) Detectada(s)
+
+            > **⛔ OpenGrep encontrou problemas de segurança nos arquivos alterados.**
+
+            ${summary.join(' · ')}
+
+            ### Findings
+
+            ${table}
+
+            ---
+
+            ### Como resolver:
+            1. **Corrija** as vulnerabilidades identificadas acima
+            2. Se um finding é **falso positivo**, marque na extensão da IDE e faça commit do \`.appsec-state/dismissed.json\`
+            3. Push na branch corrigida
+
+            ---
+            *🤖 Scan automático pelo AppSec (OpenGrep)*`.replace(/            /g, '');
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

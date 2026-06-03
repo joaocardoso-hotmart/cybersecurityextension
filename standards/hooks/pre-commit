@@ -1,30 +1,16 @@
 #!/bin/bash
-# AppSec Pre-Commit Hook
-# 1st attempt with findings: BLOCK + show grouped table
-# 2nd attempt (retry within 60s): ALLOW with warning
-# Respects dismissed findings from .appsec-state/dismissed.json
+# AppSec Pre-Commit Hook — Advisory Only
+# Scans staged files and reports findings as warnings.
+# Does NOT block commits — enforcement happens in the CI/CD pipeline.
 
 STATE_DIR=".appsec-state"
-BYPASS_FILE="$STATE_DIR/commit-bypass"
 DISMISSED_FILE="$STATE_DIR/dismissed.json"
 RULES_FILE="rules/security.yml"
 
 mkdir -p "$STATE_DIR"
 
-# Check retry
-if [ -f "$BYPASS_FILE" ]; then
-  BYPASS_TIME=$(cat "$BYPASS_FILE")
-  CURRENT_TIME=$(date +%s)
-  DIFF=$((CURRENT_TIME - BYPASS_TIME))
-  if [ "$DIFF" -lt 60 ]; then
-    printf "\n  ⚠️  Prosseguindo. O código será validado na pipeline.\n\n"
-    rm -f "$BYPASS_FILE"
-    exit 0
-  fi
-fi
-
 # Get staged code files
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
 [ -z "$STAGED_FILES" ] && exit 0
 
 # Find rules
@@ -35,11 +21,11 @@ fi
 
 command -v opengrep &>/dev/null || exit 0
 
-# Run scan and pipe to python
+# Run scan
 TMPFILE=$(mktemp)
-opengrep scan --json --quiet --config="$RULES_FILE" $STAGED_FILES > "$TMPFILE" 2>/dev/null
+opengrep scan --json --quiet --config="$RULES_FILE" $STAGED_FILES > "$TMPFILE" 2>/dev/null || true
 
-# Format output via python reading from temp file
+# Display advisory report (dismissed findings are filtered out — already reviewed)
 python3 - "$TMPFILE" "$DISMISSED_FILE" << 'EOF'
 import sys, json, os
 
@@ -53,36 +39,36 @@ try:
 except:
     sys.exit(0)
 finally:
-    os.unlink(tmpfile)
+    if os.path.exists(tmpfile):
+        os.unlink(tmpfile)
 
 if not results:
     sys.exit(0)
 
-# Load dismissed findings
-dismissed = []
+# Filter out dismissed findings so they don't clutter the output
+dismissed_keys = set()
 if dismissed_file and os.path.exists(dismissed_file):
     try:
         with open(dismissed_file) as f:
             dismissed = json.load(f)
+        for d_item in dismissed:
+            raw_id = d_item.get('id', '')
+            rule_name = raw_id.split('.rules.')[-1] if '.rules.' in raw_id else raw_id.split('.')[-1]
+            dismissed_keys.add((rule_name, d_item.get('file', ''), d_item.get('line', 0)))
+            dismissed_keys.add((rule_name, d_item.get('file', ''), 0))
     except:
-        dismissed = []
+        pass
 
-# Filter out dismissed findings
-if dismissed:
-    dismissed_set = set()
-    for d_item in dismissed:
-        # Match by rule id and file
-        key = (d_item.get('id', ''), d_item.get('file', ''))
-        dismissed_set.add(key)
-
-    filtered_results = []
+if dismissed_keys:
+    filtered = []
     for r in results:
-        rule_id = r.get('check_id', '').split('.')[-1]
-        file_path = r.get('path', '')
-        if (rule_id, file_path) not in dismissed_set:
-            filtered_results.append(r)
-
-    results = filtered_results
+        cid = r.get('check_id', '')
+        rule_name = cid.split('.rules.')[-1] if '.rules.' in cid else cid.split('.')[-1]
+        fp = r.get('path', '')
+        ln = r.get('start', {}).get('line', 0)
+        if (rule_name, fp, ln) not in dismissed_keys and (rule_name, fp, 0) not in dismissed_keys:
+            filtered.append(r)
+    results = filtered
 
 if not results:
     sys.exit(0)
@@ -100,21 +86,21 @@ for r in results:
 
 total = len(results)
 error_c = sum(1 for r in results if r.get('extra',{}).get('severity','').upper() == 'ERROR')
-warn_c = sum(1 for r in results if r.get('extra',{}).get('severity','').upper() == 'WARNING')
-info_c = total - error_c - warn_c
+warn_c  = sum(1 for r in results if r.get('extra',{}).get('severity','').upper() == 'WARNING')
+info_c  = total - error_c - warn_c
 
-R = '\033[31m'; Y = '\033[33m'; C = '\033[36m'; B = '\033[1m'; N = '\033[0m'; D = '\033[2m'
+Y = '\033[33m'; C = '\033[36m'; B = '\033[1m'; N = '\033[0m'; D = '\033[2m'; R = '\033[31m'
 
 print()
-print(f'  {B}{R}┌──────────────────────────────────────────────────────────────────┐{N}')
-print(f'  {B}{R}│  🚫 COMMIT BLOQUEADO — {total} vulnerabilidade(s) detectada(s)         │{N}')
-print(f'  {B}{R}└──────────────────────────────────────────────────────────────────┘{N}')
+print(f'  {B}{Y}┌──────────────────────────────────────────────────────────────────┐{N}')
+print(f'  {B}{Y}│  ⚠️  AppSec — {total} vulnerabilidade(s) detectada(s) no commit      │{N}')
+print(f'  {B}{Y}└──────────────────────────────────────────────────────────────────┘{N}')
 print()
 
 parts = []
 if error_c: parts.append(f'{R}{B}{error_c} critical/high{N}')
-if warn_c: parts.append(f'{Y}{warn_c} medium{N}')
-if info_c: parts.append(f'{C}{info_c} low/info{N}')
+if warn_c:  parts.append(f'{Y}{warn_c} medium{N}')
+if info_c:  parts.append(f'{C}{info_c} low/info{N}')
 print(f'  {" · ".join(parts)}')
 print()
 
@@ -123,7 +109,7 @@ print(f'  {B} {"Sev":<9} {"Qtd":<5} {"Vulnerabilidade":<26} {"Arquivos"}{N}')
 print(f'  {D}{"─"*66}{N}')
 
 sev_order = {'ERROR': 0, 'WARNING': 1, 'INFO': 2}
-sev_icon = {'ERROR': f'{R}●{N}', 'WARNING': f'{Y}●{N}', 'INFO': f'{C}●{N}'}
+sev_icon  = {'ERROR': f'{R}●{N}', 'WARNING': f'{Y}●{N}', 'INFO': f'{C}●{N}'}
 
 for (sev, rule), data in sorted(groups.items(), key=lambda x: sev_order.get(x[0][0], 3)):
     icon = sev_icon.get(sev, '○')
@@ -136,21 +122,11 @@ for (sev, rule), data in sorted(groups.items(), key=lambda x: sev_order.get(x[0]
 
 print(f'  {D}{"─"*66}{N}')
 print()
-print(f'  {D}Para prosseguir, execute o commit novamente dentro de 60s.{N}')
-print(f'  {D}O código será validado na pipeline de CI/CD.{N}')
+print(f'  {D}O commit será aceito. O SAST da pipeline irá validar e bloquear se necessário.{N}')
 print()
 
-sys.exit(1)
+# Always exit 0 — never block locally
+sys.exit(0)
 EOF
-
-EXIT_CODE=$?
-
-if [ "$EXIT_CODE" -eq 1 ]; then
-  date +%s > "$BYPASS_FILE"
-  exit 1
-fi
-
-# Clean up tmpfile if python didn't
-[ -f "$TMPFILE" ] && rm -f "$TMPFILE"
 
 exit 0
