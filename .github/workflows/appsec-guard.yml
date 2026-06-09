@@ -27,11 +27,18 @@ jobs:
           echo "╚══════════════════════════════════════════════════════════════╝"
           echo ""
 
+          # Only protect the specific files created by the AppSec extension.
+          # Developers are FREE to add their own steering/rules files
+          # in the same directories — only appsec-rules.* and token-efficiency.* files are locked.
           PROTECTED_FILES=(
             ".kiro/steering/appsec-rules.md"
+            ".kiro/steering/token-efficiency.md"
             ".claude/rules/appsec-rules.md"
+            ".claude/rules/token-efficiency.md"
             ".cursor/rules/appsec-rules.mdc"
+            ".cursor/rules/token-efficiency.mdc"
             ".github/copilot-instructions.md"
+            "AGENTS.md"
           )
 
           CHANGED_FILES=""
@@ -83,6 +90,10 @@ jobs:
             echo "  These files are PROTECTED by the AppSec team and define"
             echo "  mandatory security policies for AI-assisted development."
             echo ""
+            echo "  ℹ️  NOTE: You CAN create your own steering/rules files in"
+            echo "  the same directories. Only the appsec-rules.* files are"
+            echo "  protected. Example: .kiro/steering/my-team-rules.md is fine."
+            echo ""
             echo "  🔹 What you need to do:"
             echo "     1. Revert ALL changes to the protected files listed above"
             echo "     2. Run: git checkout origin/${{ github.base_ref }} -- <file>"
@@ -118,9 +129,13 @@ jobs:
 
             const protectedFiles = [
               '.kiro/steering/appsec-rules.md',
+              '.kiro/steering/token-efficiency.md',
               '.claude/rules/appsec-rules.md',
+              '.claude/rules/token-efficiency.md',
               '.cursor/rules/appsec-rules.mdc',
-              '.github/copilot-instructions.md'
+              '.cursor/rules/token-efficiency.mdc',
+              '.github/copilot-instructions.md',
+              'AGENTS.md'
             ];
 
             const baseBranch = context.payload.pull_request.base.ref;
@@ -142,7 +157,7 @@ jobs:
 
             if (changedFiles.length === 0) return;
 
-            const body = `## 🛡️ AppSec Rules Protection — Security Violation Detected\n\n> **⛔ This PR modifies protected security steering files.**\n\n### 🚨 Protected files changed:\n\n${changedFiles.map(f => `- ❌ \`${f}\``).join('\n')}\n\n### 📋 Changes detected:\n\n${diffDetails}\n\n---\n\n### 🔒 Why this is blocked:\n\nThese files define **mandatory security policies** maintained by the **AppSec team**.\n\n### ✅ How to fix:\n\n1. **Revert** all changes to the protected files:\n   \`\`\`bash\n   git checkout origin/${baseBranch} -- ${changedFiles.join(' ')}\n   git commit -m "revert: restore protected appsec steering files"\n   git push\n   \`\`\`\n\n2. If you need to modify these files, **contact the AppSec team** with a business justification.\n\n---\n*🤖 This check is automated by the AppSec Rules Protection workflow.*`;
+            const body = `## 🛡️ AppSec Rules Protection — Security Violation Detected\n\n> **⛔ This PR modifies protected security steering files.**\n\n### 🚨 Protected files changed:\n\n${changedFiles.map(f => `- ❌ \`${f}\``).join('\n')}\n\n### 📋 Changes detected:\n\n${diffDetails}\n\n---\n\n### 🔒 Why this is blocked:\n\nThese files define **mandatory security policies** maintained by the **AppSec team**.\n\n> ℹ️ **Note:** You are free to create your own steering/rules files in the same directories. Only the \`appsec-rules.*\` files are protected. For example, \`.kiro/steering/my-team-rules.md\` is perfectly fine.\n\n### ✅ How to fix:\n\n1. **Revert** all changes to the protected files:\n   \`\`\`bash\n   git checkout origin/${baseBranch} -- ${changedFiles.join(' ')}\n   git commit -m "revert: restore protected appsec steering files"\n   git push\n   \`\`\`\n\n2. If you need to modify these files, **contact the AppSec team** with a business justification.\n\n---\n*🤖 This check is automated by the AppSec Rules Protection workflow.*`;
 
             await github.rest.issues.createComment({
               issue_number: context.issue.number,

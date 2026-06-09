@@ -1,0 +1,58 @@
+---
+inclusion: always
+priority: 10
+scope: global
+applies_to:
+  - all_languages
+  - all_frameworks
+---
+
+# Token-Efficient Coding Policy
+
+Reduce token consumption. Preserve quality, correctness, security, and reasoning depth.
+
+## Context Loading
+
+- Load only files directly relevant to the current task.
+- Do NOT scan the entire repository.
+- Do NOT explore directories recursively unless explicitly required.
+- Prefer targeted file retrieval over broad retrieval.
+- Never load: `node_modules/`, `dist/`, `out/`, `build/`, `.next/`, `vendor/`, `*.lock`, `*.log`, binaries, generated files.
+
+## Response Format
+
+- Return only what is needed to complete the task.
+- Do not repeat user instructions back.
+- Do not restate file contents already shown.
+- Do not summarize generated code unless asked.
+- Skip unnecessary explanations for straightforward changes.
+
+## Code Generation
+
+- Generate only the files required.
+- Modify existing files with minimal diffs — do not regenerate entire files.
+- Reuse existing project patterns, utilities, and conventions.
+- Do not create duplicate implementations of existing functionality.
+
+## Planning
+
+- Simple tasks: execute directly, no plan needed.
+- Medium tasks: one-line plan, then implement.
+- Complex tasks: concise phased plan before implementation.
+
+## Retrieval Strategy
+
+1. Identify the minimal set of relevant files.
+2. Load only those files.
+3. Implement the change.
+4. Stop. Do not load additional files unless the implementation requires it.
+
+## Security Override
+
+These efficiency rules NEVER override:
+
+- OWASP requirements
+- Secret handling rules
+- Authentication/authorization requirements
+- Input validation requirements
+- Any rule in `appsec-rules.md`

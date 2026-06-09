@@ -6,10 +6,12 @@ import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from '.
 import { ensureOpenGrep } from './semgrep';
 
 const CLAUDE_FILES = {
-	rules: ['appsec-rules.md'],
+	rules: ['appsec-rules.md', 'token-efficiency.md'],
 };
 
 const GITHUB_WORKFLOW_FILES = ['appsec-guard.yml'];
+
+const CODEX_FILES = ['AGENTS.md'];
 
 /**
  * Detects which IDE is running based on vscode.env.uriScheme.
@@ -223,6 +225,14 @@ function ensureIdeRuleFilesForWorkspace(
 			if (!fs.existsSync(targetDir)) { fs.mkdirSync(targetDir, { recursive: true }); }
 			fs.copyFileSync(sourceFile, destFile);
 			console.log(`[Hotmart AppSec] Created/updated ${destFile}`);
+
+			// Token-efficiency steering
+			const tokenSrc = path.join(context.extensionPath, 'standards', 'cursor', 'rules', 'token-efficiency.mdc');
+			const tokenDest = path.join(targetDir, 'token-efficiency.mdc');
+			if (fs.existsSync(tokenSrc) && (force || !fs.existsSync(tokenDest))) {
+				fs.copyFileSync(tokenSrc, tokenDest);
+				console.log(`[Hotmart AppSec] Created/updated ${tokenDest}`);
+			}
 			break;
 		}
 		case 'kiro': {
@@ -236,6 +246,14 @@ function ensureIdeRuleFilesForWorkspace(
 			if (!fs.existsSync(targetDir)) { fs.mkdirSync(targetDir, { recursive: true }); }
 			fs.copyFileSync(sourceFile, destFile);
 			console.log(`[Hotmart AppSec] Created/updated ${destFile}`);
+
+			// Token-efficiency steering
+			const tokenSrc = path.join(context.extensionPath, 'standards', 'kiro', 'steering', 'token-efficiency.md');
+			const tokenDest = path.join(targetDir, 'token-efficiency.md');
+			if (fs.existsSync(tokenSrc) && (force || !fs.existsSync(tokenDest))) {
+				fs.copyFileSync(tokenSrc, tokenDest);
+				console.log(`[Hotmart AppSec] Created/updated ${tokenDest}`);
+			}
 			break;
 		}
 	}
@@ -917,6 +935,9 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 	// GitHub workflow is IDE-agnostic (CI/CD protection)
 	applied += await applyGitHubWorkflow(context, workspaceFolder);
 
+	// Codex AGENTS.md is IDE-agnostic
+	applied += await applyCodexFile(context, workspaceFolder);
+
 	if (applied > 0) {
 		vscode.window.showInformationMessage(
 			`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`
@@ -995,6 +1016,9 @@ async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFold
 
 	// GitHub workflow is IDE-agnostic (CI/CD protection)
 	applied += await applyGitHubWorkflow(context, workspaceFolder, force || silent);
+
+	// Codex AGENTS.md is IDE-agnostic (used by OpenAI Codex CLI)
+	applied += await applyCodexFile(context, workspaceFolder, force || silent);
 
 	if (!silent && applied > 0) {
 		vscode.window.showInformationMessage(`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`);
@@ -1131,10 +1155,26 @@ async function applyGitHubWorkflow(
 }
 
 /**
+ * Installs the Codex AGENTS.md file at the workspace root.
+ * This file provides token-efficiency instructions for OpenAI Codex CLI.
+ */
+async function applyCodexFile(
+	context: vscode.ExtensionContext,
+	workspaceFolder: string,
+	overwrite: boolean = false
+): Promise<number> {
+	const source = path.join(context.extensionPath, 'standards', 'codex', 'AGENTS.md');
+	const dest = path.join(workspaceFolder, 'AGENTS.md');
+
+	if (!fs.existsSync(source)) { return 0; }
+	return await copySingleFile(source, dest, 'AGENTS.md', overwrite);
+}
+
+/**
  * Applies IDE-specific rule files using the SAME pattern as applyClaudeFiles.
  * For VS Code: creates .github/copilot-instructions.md
- * For Cursor: creates .cursor/rules/appsec-rules.mdc
- * For Kiro: creates .kiro/steering/appsec-rules.md
+ * For Cursor: creates .cursor/rules/appsec-rules.mdc + token-efficiency.mdc
+ * For Kiro: creates .kiro/steering/appsec-rules.md + token-efficiency.md
  */
 async function applyIdeSpecificFiles(
 	context: vscode.ExtensionContext,
@@ -1173,6 +1213,13 @@ async function applyIdeSpecificFiles(
 			console.log(`[Hotmart AppSec] applyIdeSpecificFiles(cursor): source=${source}, exists=${fs.existsSync(source)}`);
 			if (!fs.existsSync(source)) { break; }
 			count += await copySingleFile(source, dest, 'appsec-rules.mdc', overwrite);
+
+			// Token-efficiency steering
+			const tokenSrc = path.join(sourceDir, 'token-efficiency.mdc');
+			const tokenDest = path.join(targetDir, 'token-efficiency.mdc');
+			if (fs.existsSync(tokenSrc)) {
+				count += await copySingleFile(tokenSrc, tokenDest, 'token-efficiency.mdc', overwrite);
+			}
 			break;
 		}
 		case 'kiro': {
@@ -1188,6 +1235,13 @@ async function applyIdeSpecificFiles(
 			console.log(`[Hotmart AppSec] applyIdeSpecificFiles(kiro): source=${source}, exists=${fs.existsSync(source)}`);
 			if (!fs.existsSync(source)) { break; }
 			count += await copySingleFile(source, dest, 'appsec-rules.md', overwrite);
+
+			// Token-efficiency steering
+			const tokenSrc = path.join(sourceDir, 'token-efficiency.md');
+			const tokenDest = path.join(targetDir, 'token-efficiency.md');
+			if (fs.existsSync(tokenSrc)) {
+				count += await copySingleFile(tokenSrc, tokenDest, 'token-efficiency.md', overwrite);
+			}
 			break;
 		}
 	}
