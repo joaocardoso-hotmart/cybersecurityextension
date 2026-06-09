@@ -63,7 +63,7 @@ install_extension() {
 }
 
 # ---------------------------------------------------------------------------
-# opengrep
+# opengrep — with integrity verification
 # ---------------------------------------------------------------------------
 install_opengrep() {
   if command -v opengrep &>/dev/null; then
@@ -71,9 +71,56 @@ install_opengrep() {
     return
   fi
   log "Installing opengrep..."
-  curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash &>/dev/null \
-    && ok "opengrep" \
-    || fail "opengrep (install manually: https://github.com/opengrep/opengrep)"
+
+  # Try brew first (signed, verified)
+  if command -v brew &>/dev/null; then
+    brew install opengrep &>/dev/null && ok "opengrep (brew)" && return
+  fi
+
+  # Fallback: download binary with checksum verification
+  local tmp_dir; tmp_dir="$(mktemp -d)"
+  local arch; arch="$(uname -m)"
+  local os="darwin"
+  local bin_name="opengrep-${os}-${arch}"
+
+  # Get latest release info
+  local release_json; release_json="$(curl -fsSL "https://api.github.com/repos/opengrep/opengrep/releases/latest" 2>/dev/null)" || {
+    fail "opengrep (cannot fetch release info)"
+    rm -rf "$tmp_dir"
+    return
+  }
+
+  local download_url; download_url="$(echo "$release_json" | grep -o "https://[^\"]*${os}.*${arch}[^\"]*" | head -1)"
+  local checksum_url="${download_url}.sha256"
+
+  if [ -z "$download_url" ]; then
+    # Ultimate fallback to official install script (less secure but functional)
+    curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash &>/dev/null \
+      && ok "opengrep (script)" \
+      || fail "opengrep (install manually: https://github.com/opengrep/opengrep)"
+    rm -rf "$tmp_dir"
+    return
+  fi
+
+  # Download binary and checksum
+  curl -fsSL -o "$tmp_dir/opengrep" "$download_url" 2>/dev/null
+  local expected_checksum; expected_checksum="$(curl -fsSL "$checksum_url" 2>/dev/null | awk '{print $1}')"
+
+  if [ -n "$expected_checksum" ]; then
+    local actual_checksum; actual_checksum="$(shasum -a 256 "$tmp_dir/opengrep" | awk '{print $1}')"
+    if [ "$expected_checksum" != "$actual_checksum" ]; then
+      fail "opengrep (checksum mismatch — possible tampering)"
+      rm -rf "$tmp_dir"
+      return
+    fi
+  fi
+
+  # Install
+  chmod +x "$tmp_dir/opengrep"
+  sudo mv "$tmp_dir/opengrep" /usr/local/bin/opengrep 2>/dev/null || mv "$tmp_dir/opengrep" "$HOME/.local/bin/opengrep"
+  rm -rf "$tmp_dir"
+
+  command -v opengrep &>/dev/null && ok "opengrep" || fail "opengrep (install failed)"
 }
 
 # ---------------------------------------------------------------------------
@@ -164,6 +211,12 @@ detect_cursor() {
     [ -x "$c" ] && echo "$c" && return
   done
   command -v cursor 2>/dev/null || echo ""
+}
+detect_windsurf() {
+  for c in "/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf" "$HOME/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf"; do
+    [ -x "$c" ] && echo "$c" && return
+  done
+  command -v windsurf 2>/dev/null || echo ""
 }
 detect_claude() {
   for c in "/usr/local/bin/claude" "$HOME/.claude/bin/claude"; do
@@ -263,6 +316,39 @@ HOOK
     chmod +x "$USER_HOME/.cursor/appsec/appsec-gate.sh"
   else
     skip "Cursor (not detected)"
+  fi
+
+  # ── Windsurf ──────────────────────────────────────────────────────────────
+  WINDSURF_CLI="$(detect_windsurf)"
+  if [ -n "$WINDSURF_CLI" ]; then
+    section "Windsurf ($WINDSURF_CLI)"
+    install_extension "$WINDSURF_CLI" "Windsurf extension"
+
+    write_file "$USER_HOME/.windsurf/rules/appsec-rules.md" "Windsurf rules" << 'EOF'
+---
+alwaysApply: true
+---
+# APPSEC SECURITY RULES — CORPORATE MANDATORY POLICY
+FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
+disabled TLS, tokens in localStorage, MD5/SHA1 for passwords, stack traces to client.
+Always use environment variables or a secret manager for credentials.
+EOF
+
+    write_file "$USER_HOME/.windsurf/appsec/appsec-gate.sh" "Windsurf appsec-gate.sh" << 'HOOK'
+#!/bin/bash
+CONTENT=$(cat)
+VIOLATIONS_FOUND=0
+echo "$CONTENT" | grep -qiE '(password|passwd|secret|api_key|token|private_key|access_key|senha|chave)\s*[=:]\s*["'"'"'][^"'"'"']{3,}' && VIOLATIONS_FOUND=1
+echo "$CONTENT" | grep -qE 'AKIA[0-9A-Z]{16}' && VIOLATIONS_FOUND=1
+echo "$CONTENT" | grep -qiE '(mongodb|postgres|mysql|redis|amqp)://[^:]+:[^@]+@' && VIOLATIONS_FOUND=1
+echo "$CONTENT" | grep -qiE 'rejectUnauthorized\s*:\s*false' && VIOLATIONS_FOUND=1
+[ "$VIOLATIONS_FOUND" -eq 0 ] && exit 0
+echo "🚫 ACESSO NEGADO — Padrão inseguro detectado. Use variáveis de ambiente."
+exit 1
+HOOK
+    chmod +x "$USER_HOME/.windsurf/appsec/appsec-gate.sh"
+  else
+    skip "Windsurf (not detected)"
   fi
 
   # ── Claude Code ───────────────────────────────────────────────────────────

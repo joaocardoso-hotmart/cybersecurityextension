@@ -1,3 +1,6 @@
+---
+inclusion: auto
+---
 # Token-Efficient Coding Policy
 
 Reduce token consumption. Preserve quality, correctness, security, and reasoning depth.
@@ -46,4 +49,4 @@ These efficiency rules NEVER override:
 - Secret handling rules
 - Authentication/authorization requirements
 - Input validation requirements
-- Secure coding requirements defined in this repository
+- Any rule in `appsec-rules.md`

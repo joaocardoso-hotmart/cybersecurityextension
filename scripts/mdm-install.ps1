@@ -248,6 +248,18 @@ function Find-CursorCli {
     return $null
 }
 
+function Find-WindsurfCli {
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\Windsurf\bin\windsurf.cmd",
+        "$env:LOCALAPPDATA\Programs\Windsurf\windsurf.exe",
+        (Get-Command windsurf -ErrorAction SilentlyContinue)?.Source
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
+    return $null
+}
+
 function Find-ClaudeCli {
     $candidates = @(
         "$env:APPDATA\npm\claude.cmd",
@@ -334,6 +346,31 @@ if ($CursorCli) {
         "Cursor appsec-gate.sh"
 } else {
     Write-Skip "Cursor (not detected)"
+}
+
+# ── Windsurf ──────────────────────────────────────────────────────────────
+$WindsurfCli = Find-WindsurfCli
+if ($WindsurfCli) {
+    Write-Section "Windsurf detected ($WindsurfCli)"
+
+    # 1. Install .vsix
+    Install-Vsix $WindsurfCli "Windsurf extension (.vsix)"
+
+    # 2. Rules → %USERPROFILE%\.windsurf\rules\appsec-rules.md
+    $WindsurfRules = Join-Path $UserHome ".windsurf\rules"
+    Install-File `
+        (Join-Path $StandardsDir "cursor\rules\appsec-rules.mdc") `
+        (Join-Path $WindsurfRules "appsec-rules.md") `
+        "Windsurf rules (appsec-rules.md)"
+
+    # 3. appsec-gate.sh → %USERPROFILE%\.windsurf\appsec\appsec-gate.sh
+    $WindsurfAppsec = Join-Path $UserHome ".windsurf\appsec"
+    Install-File `
+        (Join-Path $StandardsDir "hooks\appsec-gate.sh") `
+        (Join-Path $WindsurfAppsec "appsec-gate.sh") `
+        "Windsurf appsec-gate.sh"
+} else {
+    Write-Skip "Windsurf (not detected)"
 }
 
 # ── Claude Code ───────────────────────────────────────────────────────────
