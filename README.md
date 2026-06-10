@@ -1,210 +1,232 @@
-# 🛡️ Hotmart Cybersecurity Extension
+# 🛡️ Hotmart AppSec — Cybersecurity Extension
 
-**Security standards, delivered where developers work.**
-
-A extensão centraliza e distribui padrões de segurança diretamente nas IDEs e AI coding assistants, garantindo que todo código produzido (por humanos ou por IA) siga as guidelines de AppSec da Hotmart desde o primeiro keystroke.
-
----
-
-## O que a extensão faz
-
-### Distribuição de Padrões
-
-- **Steering files** — Regras de segurança injetadas automaticamente no contexto de AI assistants (Visual Studio, Kiro, Cursor, Copilot)
-- **Skills** — Instruções especializadas para que LLMs apliquem práticas seguras (input validation, auth patterns, secrets handling)
-- **Guidelines de AppSec** — Checklists e padrões corporativos acessíveis sem sair do editor
-
-### Secure-by-Default
-
-- Templates e snippets com padrões seguros pré-configurados
-- Validação de input, output encoding e parameterized queries como padrão
-- Configurações de segurança aplicadas automaticamente em novos projetos
-
-### Bootstrap de Projetos
-
-- Configuração automática de steering files para AI IDEs
-- Estrutura de segurança pronta para novos repositórios
-- Integração com pipelines de CI/CD security checks
-
-### Governança Técnica
-
-- Versionamento de padrões corporativos de segurança
-- Atualização centralizada — um push atualiza todos os projetos
-- Rastreabilidade de qual versão dos padrões cada projeto utiliza
+Extensão de segurança corporativa que protege o código em tempo real direto nas IDEs com IA.  
+Distribuída automaticamente via MDM (Workspace ONE) para todas as máquinas de desenvolvedores.
 
 ---
 
-## Compatibilidade
+## O que faz
 
-| Plataforma | Suporte |
-|------------|---------|
-| VS Code | ✅ |
-| Kiro | ✅ |
-| Cursor | ✅ |
-| GitHub Copilot | ✅ |
+- **Scan de código em tempo real** — Detecta vulnerabilidades enquanto você escreve (SAST via OpenGrep)
+- **Proteção nas IDEs com IA** — Bloqueia prompts inseguros no Kiro, Cursor, Windsurf e Claude Code
+- **Pre-commit advisory** — Avisa sobre vulnerabilidades antes do commit (sem bloquear)
+- **Auto-deploy via MDM** — Instalação silenciosa e persistente sem ação do dev
 
 ---
 
-## Instalação
+## IDEs Suportadas
 
-### Via Marketplace
+| IDE | Extensão | AI Gate | Rules |
+|-----|----------|---------|-------|
+| Kiro | ✅ | ✅ Steering + Hook | ✅ |
+| VS Code | ✅ | — | — |
+| Cursor | ✅ | ✅ appsec-gate.sh | ✅ .mdc |
+| Windsurf | ✅ | ✅ appsec-gate.sh | ✅ |
+| Claude Code | — | ✅ PreToolUse hook | ✅ |
 
-1. Abra o VS Code / Kiro / Cursor
-2. Vá em **Extensions** (`Ctrl+Shift+X` / `Cmd+Shift+X`)
-3. Busque por **Hotmart Cybersecurity**
-4. Clique em **Install**
+---
 
-### Via CLI
+## Vulnerabilidades Detectadas
 
-```bash
-code --install-extension HotmartCybersecurity.cybersecurityextension
+| CWE | Categoria | Severidade |
+|-----|-----------|------------|
+| CWE-798 | Credenciais hardcoded | 🔴 ERROR |
+| CWE-89 | SQL Injection | 🔴 ERROR |
+| CWE-78 | Command Injection | 🔴 ERROR |
+| CWE-79 | Cross-Site Scripting (XSS) | 🔴 ERROR |
+| CWE-22 | Path Traversal | 🔴 ERROR |
+| CWE-918 | Server-Side Request Forgery | 🔴 ERROR |
+| CWE-327 | Criptografia fraca | 🟡 WARNING |
+| CWE-295 | TLS desabilitado | 🔴 ERROR |
+| CWE-922 | Tokens em localStorage | 🟡 WARNING |
+| CWE-601 | Open Redirect | 🟡 WARNING |
+| CWE-209 | Stack trace exposto | 🟡 WARNING |
+| CWE-94 | Prototype Pollution | 🟡 WARNING |
+| CWE-1333 | ReDoS | 🔴 ERROR |
+
+---
+
+## Estrutura do Repositório
+
+```
+.
+├── src/                     # Código da extensão VS Code
+│   ├── extension.ts         # Entry point da extensão
+│   ├── scanner.ts           # Scanner de vulnerabilidades
+│   ├── semgrep.ts           # Integração com OpenGrep/Semgrep
+│   └── sidebar.ts           # Painel lateral da extensão
+│
+├── rules/
+│   └── security.yml         # Regras SAST (OpenGrep/Semgrep format)
+│
+├── deploy/                  # Scripts de distribuição MDM
+│   ├── macos/               # Instalador macOS (.pkg)
+│   │   ├── build-pkg.sh     # Gera o .pkg para Workspace ONE
+│   │   ├── mdm-install.sh   # Instalador principal
+│   │   ├── mdm-watchdog.sh  # Daemon de persistência (30 min)
+│   │   ├── mdm-uninstall.sh # Desinstalador completo
+│   │   └── com.hotmart.appsec.watchdog.plist  # LaunchDaemon config
+│   │
+│   └── windows/             # Instalador Windows (.exe)
+│       ├── build.cmd         # Gera o .exe via InnoSetup
+│       ├── setup.iss         # InnoSetup script
+│       ├── mdm-install.ps1   # Instalador principal
+│       ├── mdm-watchdog.ps1  # Scheduled Task (30 min)
+│       ├── mdm-uninstall.ps1 # Desinstalador completo
+│       ├── build-win-installer.ps1  # Build alternativo (ZIP)
+│       └── appsec-watchdog-task.xml # Task Scheduler config
+│
+├── media/                   # Ícones e assets
+├── dist/                    # Artefatos gerados (não comitar)
+├── .github/workflows/       # CI/CD (GitHub Actions)
+└── .kiro/specs/             # Spec-Driven Documentation
+    └── mdm-deployment/
+        ├── requirements.md  # Requisitos do sistema (17 reqs)
+        ├── design.md        # Arquitetura técnica
+        └── tasks.md         # Plano de implementação
 ```
 
 ---
 
-## Quick Start
+## Deploy via MDM
 
-Após instalar, abra a paleta de comandos (`Ctrl+Shift+P` / `Cmd+Shift+P`) e execute:
+### macOS (Workspace ONE)
 
-| Comando | O que faz |
-|---------|-----------|
-| `Cybersecurity: Bootstrap Project` | Configura steering files e padrões de segurança no projeto atual |
-| `Cybersecurity: Update Standards` | Atualiza para a versão mais recente dos padrões |
-| `Cybersecurity: Show Guidelines` | Exibe as guidelines de AppSec aplicáveis ao contexto |
+```bash
+# Gera o .pkg (roda na máquina do dev)
+bash deploy/macos/build-pkg.sh
+# Saída: dist/hotmart-appsec-<version>.pkg
+```
+
+| Config no Workspace ONE | Valor |
+|---|---|
+| Package | `hotmart-appsec-X.Y.Z.pkg` |
+| Install Context | Device |
+| Uninstall Script | `sudo bash "/Library/Application Support/Hotmart/appsec/mdm-uninstall.sh"` |
+| Detection | Receipt: `com.hotmart.appsec` |
+
+### Windows (Workspace ONE)
+
+```cmd
+REM Gera o .exe (roda no Windows com InnoSetup instalado)
+deploy\windows\build.cmd
+REM Saída: dist\HotmartAppSec-Setup-<version>.exe
+```
+
+| Config no Workspace ONE | Valor |
+|---|---|
+| Install Command | `HotmartAppSec-Setup-X.Y.Z.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
+| Uninstall Command | `"C:\ProgramData\Hotmart\appsec\unins000.exe" /VERYSILENT` |
+| Detection | Registry: `HKLM\SOFTWARE\Hotmart\AppSec\Version` |
 
 ---
 
 ## Como funciona
 
 ```
-┌─────────────────────────────────────────────────┐
-│           Hotmart Cybersecurity Extension        │
-├─────────────────────────────────────────────────┤
-│                                                 │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐   │
-│  │  Steering │  │   Skills  │  │ Templates │   │
-│  │   Files   │  │    .md    │  │ & Snippets│   │
-│  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘   │
-│        │               │               │        │
-│        ▼               ▼               ▼        │
-│  ┌─────────────────────────────────────────┐    │
-│  │         Project Workspace               │    │
-│  │  .kiro/steering/ · .cursor/rules/ ·     │    │
-│  │  .github/copilot/ · .vscode/            │    │
-│  └─────────────────────────────────────────┘    │
-│                                                 │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    Workspace ONE                           │
+│            (distribui .pkg / .exe silenciosamente)         │
+└───────────────────────────┬──────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────┐
+│                  Post-Install Script                       │
+│   1. Instala opengrep (bundled, sem internet)             │
+│   2. Detecta IDEs instaladas                              │
+│   3. Instala extensão do marketplace                      │
+│   4. Configura steering/rules/hooks por IDE               │
+│   5. Instala pre-commit hooks nos repos                   │
+│   6. Ativa watchdog (LaunchDaemon / Scheduled Task)       │
+└──────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────┐
+│                  Watchdog (a cada 30 min)                  │
+│   • Verifica se opengrep está instalado                   │
+│   • Verifica se extensões estão nas IDEs                  │
+│   • Restaura configs se removidos                         │
+│   • CPU mínima (nice 19 / Below Normal)                   │
+└──────────────────────────────────────────────────────────┘
 ```
 
-A extensão atua como uma **camada de distribuição centralizada**: os padrões são mantidos e versionados no repositório da extensão, e entregues automaticamente nos diretórios que cada AI IDE espera.
+---
+
+## Segurança
+
+### Certificate Pinning (Supply Chain Protection)
+
+O instalador opera em redes com proxy SSL corporativo (Zscaler).  
+Para evitar supply chain attacks, o certificado é validado por **SHA-256 fingerprint pinning**:
+
+1. Busca o certificado pelo CN exato no cert store do sistema
+2. Calcula o SHA-256 do certificado encontrado
+3. Compara com o fingerprint hardcoded no script
+4. Se não bater → **recusa** e loga alerta de segurança
+5. Se não existir (sem proxy) → ignora e instala normalmente
+
+### Princípios
+
+- **Zero internet no install** — opengrep bundled no pacote
+- **Advisory-only** — pre-commit nunca bloqueia commits
+- **Idempotente** — rodar múltiplas vezes produz o mesmo resultado
+- **Graceful degradation** — se uma IDE não é encontrada, continua com as outras
+- **Clean removal** — uninstall remove 100% dos artefatos
 
 ---
 
-## Padrões Distribuídos
+## Spec-Driven Documentation
 
-Os padrões cobrem áreas críticas de segurança:
+Este projeto segue um modelo **spec-driven** — toda mudança deve respeitar os documentos em `.kiro/specs/mdm-deployment/`:
 
-- **Autenticação e Autorização** — OAuth, JWT validation, session management
-- **Input Validation** — Sanitização, encoding, type checking
-- **Secrets Management** — Detecção de hardcoded secrets, vault patterns
-- **API Security** — Rate limiting, CORS, authentication headers
-- **Data Protection** — Encryption at rest/transit, PII handling
-- **Dependency Security** — Supply chain, version pinning, vulnerability checks
-- **Infrastructure** — Least privilege IAM, network segmentation, logging
+| Documento | O que contém |
+|-----------|-------------|
+| [`requirements.md`](.kiro/specs/mdm-deployment/requirements.md) | 17 requisitos com acceptance criteria (formato EARS) |
+| [`design.md`](.kiro/specs/mdm-deployment/design.md) | Arquitetura, componentes, modelos de dados, fluxos |
+| [`tasks.md`](.kiro/specs/mdm-deployment/tasks.md) | Plano de implementação com dependency graph |
+
+**Para contribuir:**
+1. Leia o `requirements.md` para entender o que o sistema faz
+2. Consulte o `design.md` para entender como funciona
+3. Siga o `tasks.md` para implementar mudanças
 
 ---
 
-## Contribuindo
+## Desenvolvimento
 
-Os padrões de segurança são mantidos pelo time de Cybersecurity. Para sugerir alterações:
+```bash
+# Instalar dependências
+npm install
 
-1. Abra uma issue descrevendo a mudança proposta
-2. Submeta um PR com a alteração no padrão
-3. O time de AppSec revisa e aprova
+# Compilar a extensão
+npm run compile
+
+# Lint
+npm run lint
+```
+
+### Testar localmente (macOS)
+
+```bash
+# Instalar manualmente (sem MDM)
+sudo bash deploy/macos/mdm-install.sh
+
+# Verificar estado
+opengrep --version
+kiro --list-extensions | grep -i hotmart
+```
+
+### Logs
+
+| Plataforma | Caminho |
+|---|---|
+| macOS | `/Library/Logs/Hotmart/appsec-install.log` |
+| macOS | `/Library/Logs/Hotmart/appsec-watchdog.log` |
+| Windows | `C:\ProgramData\Hotmart\logs\appsec-install.log` |
+| Windows | `C:\ProgramData\Hotmart\logs\appsec-watchdog.log` |
 
 ---
 
 ## Licença
 
-MIT — veja [LICENSE](LICENSE).
-
----
-
-## Estrutura do Projeto
-
-```
-cybersecurityextension/
-├── .github/workflows/     # CI/CD (publish, appsec-guard)
-├── .kiro/                 # Kiro steering & hooks (this repo's config)
-│   ├── hooks/
-│   └── steering/
-├── media/                 # Icons e assets
-├── rules/                 # Regras SAST (opengrep/semgrep)
-│   └── security.yml
-├── scripts/               # MDM deployment scripts
-│   ├── mdm-install.sh     # macOS/Linux installer
-│   ├── mdm-install.ps1    # Windows installer  
-│   ├── mdm-watchdog.sh    # macOS persistence daemon
-│   ├── mdm-watchdog.ps1   # Windows persistence task
-│   ├── com.hotmart.appsec.watchdog.plist  # macOS LaunchDaemon
-│   └── appsec-watchdog-task.xml           # Windows Task Scheduler
-├── src/                   # Extension source code
-│   ├── extension.ts
-│   ├── scanner.ts
-│   ├── semgrep.ts
-│   └── sidebar.ts
-├── package.json
-└── README.md
-```
-
----
-
-## MDM Deployment
-
-A extensão pode ser instalada de forma forçada via MDM (Jamf, Intune, etc).
-
-### macOS
-
-```bash
-# 1. Deploy scripts
-sudo mkdir -p "/Library/Application Support/Hotmart/appsec"
-sudo cp mdm-watchdog.sh "/Library/Application Support/Hotmart/appsec/"
-sudo cp com.hotmart.appsec.watchdog.plist /Library/LaunchDaemons/
-
-# 2. Set permissions
-sudo chmod 644 /Library/LaunchDaemons/com.hotmart.appsec.watchdog.plist
-sudo chown root:wheel /Library/LaunchDaemons/com.hotmart.appsec.watchdog.plist
-
-# 3. Load daemon
-sudo launchctl load /Library/LaunchDaemons/com.hotmart.appsec.watchdog.plist
-
-# 4. Initial install
-sudo bash mdm-install.sh
-```
-
-### Windows
-
-```powershell
-# 1. Deploy scripts
-New-Item -ItemType Directory -Path "C:\ProgramData\Hotmart\appsec" -Force
-Copy-Item mdm-watchdog.ps1 "C:\ProgramData\Hotmart\appsec\"
-Copy-Item appsec-watchdog-task.xml "C:\ProgramData\Hotmart\appsec\"
-
-# 2. Register task
-schtasks /Create /XML "C:\ProgramData\Hotmart\appsec\appsec-watchdog-task.xml" /TN "Hotmart\AppSecWatchdog" /F
-
-# 3. Initial install
-powershell -ExecutionPolicy Bypass -File mdm-install.ps1
-```
-
-O watchdog garante que a extensão permaneça instalada e as configurações de segurança não sejam alteradas pelo desenvolvedor.
-
-### IDEs Suportadas pelo MDM
-
-| IDE | Extension | Steering/Rules | Hooks |
-|-----|-----------|----------------|-------|
-| Kiro | ✅ | ✅ | ✅ |
-| VS Code | ✅ | — | — |
-| Cursor | ✅ | ✅ | ✅ |
-| Windsurf | ✅ | ✅ | ✅ |
-| Claude Code | — | ✅ | ✅ |
+Proprietary — Hotmart Cybersecurity Team
