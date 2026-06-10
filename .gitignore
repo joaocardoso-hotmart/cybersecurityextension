@@ -1,5 +1,6 @@
 ## Build artifacts
 out/
+dist/
 *.vsix
 
 ## Dependencies
@@ -24,3 +25,6 @@ Thumbs.db
 
 ## Logs
 *.log
+
+## InnoSetup build temp
+deploy/windows/payload/
