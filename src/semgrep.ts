@@ -233,5 +233,30 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 		console.error('OpenGrep parse error:', err);
 	}
 
-	return sortBySeverity(findings);
+	// Deduplicate findings with same CWE on the same file:line
+	const deduped = deduplicateFindings(findings);
+
+	return sortBySeverity(deduped);
+}
+
+/**
+ * Removes duplicate findings that share the same CWE and location (file + line).
+ * Keeps the finding with highest severity (or first occurrence if equal).
+ */
+function deduplicateFindings(findings: SecurityFinding[]): SecurityFinding[] {
+	const seen = new Map<string, SecurityFinding>();
+	const severityRank: Record<Severity, number> = {
+		critical: 0, high: 1, medium: 2, low: 3, info: 4,
+	};
+
+	for (const finding of findings) {
+		const key = `${finding.cwe}:${finding.file}:${finding.line}`;
+		const existing = seen.get(key);
+
+		if (!existing || severityRank[finding.severity] < severityRank[existing.severity]) {
+			seen.set(key, finding);
+		}
+	}
+
+	return Array.from(seen.values());
 }

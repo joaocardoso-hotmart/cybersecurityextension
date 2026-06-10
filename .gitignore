@@ -1,4 +1,26 @@
+## Build artifacts
 out/
-node_modules/
-.vscode-test/
 *.vsix
+
+## Dependencies
+node_modules/
+
+## IDE test directories
+.vscode-test/
+
+## Local IDE configurations (testing only)
+.claude/
+.cursor/
+.windsurf/
+.vscode/steering/
+
+## Runtime state (local dev only)
+.appsec/
+.appsec-state/
+
+## OS files
+.DS_Store
+Thumbs.db
+
+## Logs
+*.log

@@ -127,3 +127,84 @@ Os padrões de segurança são mantidos pelo time de Cybersecurity. Para sugerir
 ## Licença
 
 MIT — veja [LICENSE](LICENSE).
+
+---
+
+## Estrutura do Projeto
+
+```
+cybersecurityextension/
+├── .github/workflows/     # CI/CD (publish, appsec-guard)
+├── .kiro/                 # Kiro steering & hooks (this repo's config)
+│   ├── hooks/
+│   └── steering/
+├── media/                 # Icons e assets
+├── rules/                 # Regras SAST (opengrep/semgrep)
+│   └── security.yml
+├── scripts/               # MDM deployment scripts
+│   ├── mdm-install.sh     # macOS/Linux installer
+│   ├── mdm-install.ps1    # Windows installer  
+│   ├── mdm-watchdog.sh    # macOS persistence daemon
+│   ├── mdm-watchdog.ps1   # Windows persistence task
+│   ├── com.hotmart.appsec.watchdog.plist  # macOS LaunchDaemon
+│   └── appsec-watchdog-task.xml           # Windows Task Scheduler
+├── src/                   # Extension source code
+│   ├── extension.ts
+│   ├── scanner.ts
+│   ├── semgrep.ts
+│   └── sidebar.ts
+├── package.json
+└── README.md
+```
+
+---
+
+## MDM Deployment
+
+A extensão pode ser instalada de forma forçada via MDM (Jamf, Intune, etc).
+
+### macOS
+
+```bash
+# 1. Deploy scripts
+sudo mkdir -p "/Library/Application Support/Hotmart/appsec"
+sudo cp mdm-watchdog.sh "/Library/Application Support/Hotmart/appsec/"
+sudo cp com.hotmart.appsec.watchdog.plist /Library/LaunchDaemons/
+
+# 2. Set permissions
+sudo chmod 644 /Library/LaunchDaemons/com.hotmart.appsec.watchdog.plist
+sudo chown root:wheel /Library/LaunchDaemons/com.hotmart.appsec.watchdog.plist
+
+# 3. Load daemon
+sudo launchctl load /Library/LaunchDaemons/com.hotmart.appsec.watchdog.plist
+
+# 4. Initial install
+sudo bash mdm-install.sh
+```
+
+### Windows
+
+```powershell
+# 1. Deploy scripts
+New-Item -ItemType Directory -Path "C:\ProgramData\Hotmart\appsec" -Force
+Copy-Item mdm-watchdog.ps1 "C:\ProgramData\Hotmart\appsec\"
+Copy-Item appsec-watchdog-task.xml "C:\ProgramData\Hotmart\appsec\"
+
+# 2. Register task
+schtasks /Create /XML "C:\ProgramData\Hotmart\appsec\appsec-watchdog-task.xml" /TN "Hotmart\AppSecWatchdog" /F
+
+# 3. Initial install
+powershell -ExecutionPolicy Bypass -File mdm-install.ps1
+```
+
+O watchdog garante que a extensão permaneça instalada e as configurações de segurança não sejam alteradas pelo desenvolvedor.
+
+### IDEs Suportadas pelo MDM
+
+| IDE | Extension | Steering/Rules | Hooks |
+|-----|-----------|----------------|-------|
+| Kiro | ✅ | ✅ | ✅ |
+| VS Code | ✅ | — | — |
+| Cursor | ✅ | ✅ | ✅ |
+| Windsurf | ✅ | ✅ | ✅ |
+| Claude Code | — | ✅ | ✅ |
