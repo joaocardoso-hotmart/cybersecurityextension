@@ -1,11 +1,5 @@
----
-inclusion: auto
-priority: maximum
-enforcement: mandatory
----
-# APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
+# APPSEC SECURITY RULES — CORPORATE MANDATORY POLICY
 
-This assistant MUST always generate secure-by-default code.
 FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
 disabled TLS, tokens in localStorage, MD5/SHA1 for passwords, stack traces to client.
 Always use environment variables or a secret manager for credentials.

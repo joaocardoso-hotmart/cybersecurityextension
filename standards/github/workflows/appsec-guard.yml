@@ -1,0 +1,451 @@
+name: "🛡️ AppSec Rules Protection"
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  appsec-guard:
+    name: "🔒 Security Rules Integrity Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: "🛡️ Detect changes to AppSec steering files"
+        id: detect
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  🛡️  AppSec Rules Protection — Security Integrity Check    ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          PROTECTED_FILES=(
+            ".kiro/steering/appsec-rules.md"
+            ".claude/rules/appsec-rules.md"
+            ".cursor/rules/appsec-rules.mdc"
+            ".github/copilot-instructions.md"
+          )
+
+          CHANGED_FILES=""
+          HAS_VIOLATION="false"
+
+          for file in "${PROTECTED_FILES[@]}"; do
+            if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${file}$"; then
+              # Check if the file is being ADDED (new) or MODIFIED (existing)
+              # Only block modifications, not initial creation by the extension
+              if git show origin/${{ github.base_ref }}:"${file}" &>/dev/null; then
+                # File exists in base branch → this is a MODIFICATION → block
+                HAS_VIOLATION="true"
+                CHANGED_FILES="${CHANGED_FILES}${file}\n"
+              else
+                # File does NOT exist in base branch → this is a CREATION → allow
+                echo "  ℹ️  ${file} is being created (first time) — allowed"
+              fi
+            fi
+          done
+
+          echo "has_violation=${HAS_VIOLATION}" >> $GITHUB_OUTPUT
+
+          if [ "$HAS_VIOLATION" = "true" ]; then
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  ⛔ SECURITY VIOLATION DETECTED                              │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+            echo "🚨 The following protected security files were modified:"
+            echo ""
+            echo -e "$CHANGED_FILES" | while read -r f; do
+              if [ -n "$f" ]; then
+                echo "   ❌  $f"
+              fi
+            done
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  📋 DIFF DETAILS — Lines changed by this PR                 │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+
+            echo -e "$CHANGED_FILES" | while read -r f; do
+              if [ -n "$f" ] && [ -f "$f" ]; then
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "📄 File: $f"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                git diff origin/${{ github.base_ref }}...HEAD -- "$f" || true
+                echo ""
+              fi
+            done
+
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  🔒 ACTION REQUIRED                                          │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+            echo "  These files are PROTECTED by the AppSec team and define"
+            echo "  mandatory security policies for AI-assisted development."
+            echo ""
+            echo "  🔹 What you need to do:"
+            echo "     1. Revert ALL changes to the protected files listed above"
+            echo "     2. Run: git checkout origin/${{ github.base_ref }} -- <file>"
+            echo "     3. Push the corrected branch"
+            echo ""
+            echo "  🔹 If you believe a change is necessary:"
+            echo "     • Open a request with the AppSec team"
+            echo "     • Provide business justification"
+            echo "     • Wait for explicit approval before modifying"
+            echo ""
+            echo "  📧 Contact: appsec@yourcompany.com"
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║  ❌  THIS PR CANNOT BE MERGED — SECURITY VIOLATION         ║"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            exit 1
+          else
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  ✅ No changes detected in protected security files          │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+          fi
+
+      - name: "💬 Comment on PR with violation details"
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            const protectedFiles = [
+              '.kiro/steering/appsec-rules.md',
+              '.claude/rules/appsec-rules.md',
+              '.cursor/rules/appsec-rules.mdc',
+              '.github/copilot-instructions.md'
+            ];
+
+            const baseBranch = context.payload.pull_request.base.ref;
+            let changedFiles = [];
+            let diffDetails = '';
+
+            for (const file of protectedFiles) {
+              try {
+                const diff = execSync(
+                  `git diff origin/${baseBranch}...HEAD -- "${file}"`,
+                  { encoding: 'utf-8' }
+                ).trim();
+                if (diff) {
+                  changedFiles.push(file);
+                  diffDetails += `\n<details>\n<summary>📄 <code>${file}</code></summary>\n\n\`\`\`diff\n${diff}\n\`\`\`\n</details>\n`;
+                }
+              } catch (e) {}
+            }
+
+            if (changedFiles.length === 0) return;
+
+            const body = `## 🛡️ AppSec Rules Protection — Security Violation Detected\n\n> **⛔ This PR modifies protected security steering files.**\n\n### 🚨 Protected files changed:\n\n${changedFiles.map(f => `- ❌ \`${f}\``).join('\n')}\n\n### 📋 Changes detected:\n\n${diffDetails}\n\n---\n\n### 🔒 Why this is blocked:\n\nThese files define **mandatory security policies** maintained by the **AppSec team**.\n\n### ✅ How to fix:\n\n1. **Revert** all changes to the protected files:\n   \`\`\`bash\n   git checkout origin/${baseBranch} -- ${changedFiles.join(' ')}\n   git commit -m "revert: restore protected appsec steering files"\n   git push\n   \`\`\`\n\n2. If you need to modify these files, **contact the AppSec team** with a business justification.\n\n---\n*🤖 This check is automated by the AppSec Rules Protection workflow.*`;
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  hook-integrity:
+    name: "🪝 Pre-Commit Hook Integrity Check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: "🪝 Verify pre-commit hook integrity"
+        id: hook-check
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  🪝 Pre-Commit Hook Integrity Check                        ║"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          HOOK_FILE=".appsec/appsec-gate.sh"
+          HAS_ISSUE="false"
+          ISSUE_TYPE=""
+
+          # Check if hook file exists
+          if [ ! -f "$HOOK_FILE" ]; then
+            HAS_ISSUE="true"
+            ISSUE_TYPE="deleted"
+            echo "  ❌ Hook file not found: $HOOK_FILE"
+          else
+            # Check if hook was modified in this PR
+            if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${HOOK_FILE}$"; then
+              HAS_ISSUE="true"
+              ISSUE_TYPE="modified"
+              echo "  ⚠️  Hook file was modified in this PR"
+              echo ""
+              echo "  Changes:"
+              git diff origin/${{ github.base_ref }}...HEAD -- "$HOOK_FILE" || true
+            fi
+
+            # Check if hook is executable
+            if [ ! -x "$HOOK_FILE" ]; then
+              HAS_ISSUE="true"
+              ISSUE_TYPE="disabled"
+              echo "  ⚠️  Hook file is not executable (disabled)"
+            fi
+          fi
+
+          # Also check if .appsec-state/dismissed.json was tampered
+          DISMISSED_FILE=".appsec-state/dismissed.json"
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${DISMISSED_FILE}$"; then
+            # Check if ALL findings were dismissed (suspicious bulk dismiss)
+            if [ -f "$DISMISSED_FILE" ]; then
+              DISMISSED_COUNT=$(python3 -c "import json; d=json.load(open('$DISMISSED_FILE')); print(len(d))" 2>/dev/null || echo "0")
+              if [ "$DISMISSED_COUNT" -gt 20 ]; then
+                echo ""
+                echo "  ⚠️  Suspicious: $DISMISSED_COUNT findings dismissed in bulk"
+              fi
+            fi
+          fi
+
+          echo "has_issue=${HAS_ISSUE}" >> $GITHUB_OUTPUT
+          echo "issue_type=${ISSUE_TYPE}" >> $GITHUB_OUTPUT
+
+          if [ "$HAS_ISSUE" = "true" ]; then
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  ⛔ HOOK INTEGRITY VIOLATION                                 │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+
+            if [ "$ISSUE_TYPE" = "deleted" ]; then
+              echo "  O hook de segurança (.appsec/appsec-gate.sh) foi removido."
+              echo ""
+              echo "  👉 Ative o hook para prosseguir com a PR."
+              echo ""
+              echo "  Para restaurar:"
+              echo "    git checkout origin/${{ github.base_ref }} -- .appsec/appsec-gate.sh"
+              echo "    git commit -m 'fix: restore appsec hook'"
+              echo "    git push"
+            elif [ "$ISSUE_TYPE" = "modified" ]; then
+              echo "  O hook de segurança (.appsec/appsec-gate.sh) foi alterado."
+              echo ""
+              echo "  👉 Volte o hook ao original para prosseguir com a PR."
+              echo ""
+              echo "  Para restaurar:"
+              echo "    git checkout origin/${{ github.base_ref }} -- .appsec/appsec-gate.sh"
+              echo "    git commit -m 'fix: restore appsec hook'"
+              echo "    git push"
+            elif [ "$ISSUE_TYPE" = "disabled" ]; then
+              echo "  O hook de segurança (.appsec/appsec-gate.sh) foi desativado"
+              echo "  (permissão de execução removida)."
+              echo ""
+              echo "  👉 Ative o hook para prosseguir com a PR."
+              echo ""
+              echo "  Para restaurar:"
+              echo "    chmod +x .appsec/appsec-gate.sh"
+              echo "    git add .appsec/appsec-gate.sh"
+              echo "    git commit -m 'fix: restore appsec hook permissions'"
+              echo "    git push"
+            fi
+
+            echo ""
+            echo "╔══════════════════════════════════════════════════════════════╗"
+            echo "║  ❌  THIS PR CANNOT BE MERGED — HOOK VIOLATION             ║"
+            echo "╚══════════════════════════════════════════════════════════════╝"
+            echo ""
+
+            exit 1
+          else
+            echo ""
+            echo "┌──────────────────────────────────────────────────────────────┐"
+            echo "│  ✅ Pre-commit hook is intact and active                     │"
+            echo "└──────────────────────────────────────────────────────────────┘"
+            echo ""
+          fi
+
+      - name: "💬 Comment on PR about hook violation"
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const issueType = '${{ steps.hook-check.outputs.issue_type }}';
+            const baseBranch = context.payload.pull_request.base.ref;
+
+            let message = '';
+            if (issueType === 'deleted') {
+              message = `## 🪝 Hook de Segurança Removido\n\n> **⛔ O hook de segurança (\`.appsec/appsec-gate.sh\`) foi removido nesta PR.**\n\n### 👉 Ative o hook para prosseguir com a PR.\n\nPara restaurar:\n\`\`\`bash\ngit checkout origin/${baseBranch} -- .appsec/appsec-gate.sh\ngit commit -m "fix: restore appsec hook"\ngit push\n\`\`\`\n\n---\n*🤖 Verificação automática do AppSec.*`;
+            } else if (issueType === 'modified') {
+              message = `## 🪝 Hook de Segurança Alterado\n\n> **⛔ O hook de segurança (\`.appsec/appsec-gate.sh\`) foi modificado nesta PR.**\n\n### 👉 Volte o hook ao original para prosseguir com a PR.\n\nPara restaurar:\n\`\`\`bash\ngit checkout origin/${baseBranch} -- .appsec/appsec-gate.sh\ngit commit -m "fix: restore appsec hook"\ngit push\n\`\`\`\n\n---\n*🤖 Verificação automática do AppSec.*`;
+            } else if (issueType === 'disabled') {
+              message = `## 🪝 Hook de Segurança Desativado\n\n> **⛔ O hook de segurança (\`.appsec/appsec-gate.sh\`) teve suas permissões removidas.**\n\n### 👉 Ative o hook para prosseguir com a PR.\n\nPara restaurar:\n\`\`\`bash\nchmod +x .appsec/appsec-gate.sh\ngit add .appsec/appsec-gate.sh\ngit commit -m "fix: restore appsec hook permissions"\ngit push\n\`\`\`\n\n---\n*🤖 Verificação automática do AppSec.*`;
+            }
+
+            if (message) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: message
+              });
+            }
+
+  sast-scan:
+    name: "🔍 SAST — OpenGrep Security Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Install OpenGrep
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: "🔍 Run SAST scan on changed files"
+        id: scan
+        run: |
+          RULES_FILE="rules/security.yml"
+          DISMISSED_FILE=".appsec-state/dismissed.json"
+
+          if [ ! -f "$RULES_FILE" ]; then
+            echo "Rules file not found — skipping"
+            exit 0
+          fi
+
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -iE '\.(ts|tsx|js|jsx|mjs|cjs|java|kt|kts|py|pyi|go|rb|php|c|h|cpp|cs|swift|rs|scala)$' || true)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No code files changed."
+            exit 0
+          fi
+
+          echo "Scanning $(echo "$CHANGED_FILES" | wc -l | tr -d ' ') file(s)..."
+
+          TMPFILE=$(mktemp)
+          opengrep scan --json --quiet --config="$RULES_FILE" $CHANGED_FILES > "$TMPFILE" 2>/dev/null || true
+
+          python3 -c "
+          import sys, json, os
+
+          tmpfile, dismissed_file = '$TMPFILE', '$DISMISSED_FILE'
+
+          try:
+              with open(tmpfile) as f: data = json.load(f)
+              results = data.get('results', [])
+          except: sys.exit(0)
+          finally:
+              os.path.exists(tmpfile) and os.unlink(tmpfile)
+
+          if not results:
+              print('No security findings.'); sys.exit(0)
+
+          dismissed_keys = set()
+          if os.path.exists(dismissed_file):
+              try:
+                  for d in json.load(open(dismissed_file)):
+                      rid = d.get('id','')
+                      rn = rid.split('.rules.')[-1] if '.rules.' in rid else rid.split('.')[-1]
+                      dismissed_keys.update([(rn, d.get('file',''), d.get('line',0)), (rn, d.get('file',''), 0)])
+              except: pass
+
+          if dismissed_keys:
+              filtered = []
+              for r in results:
+                  cid = r.get('check_id','')
+                  rn = cid.split('.rules.')[-1] if '.rules.' in cid else cid.split('.')[-1]
+                  fp, ln = r.get('path',''), r.get('start',{}).get('line',0)
+                  if (rn, fp, ln) not in dismissed_keys and (rn, fp, 0) not in dismissed_keys:
+                      filtered.append(r)
+              results = filtered
+
+          if not results:
+              print('All findings dismissed as false positives.'); sys.exit(0)
+
+          with open('sast-findings.json', 'w') as f:
+              json.dump(results, f)
+
+          total = len(results)
+          errors = sum(1 for r in results if r.get('extra',{}).get('severity','').upper() == 'ERROR')
+          print(f'SAST FAILED: {total} finding(s) detected ({errors} critical/high)')
+          for r in results:
+              sev = r.get('extra',{}).get('severity','INFO').upper()
+              rule = r.get('check_id','?').split('.')[-1][:30]
+              f = r.get('path','?')
+              ln = r.get('start',{}).get('line','?')
+              print(f'  {sev:<8} {rule:<30} {f} L{ln}')
+          sys.exit(1 if errors > 0 else 0)
+          "
+
+      - name: "💬 Comment findings on PR"
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const fs = require('fs');
+
+            let findings = [];
+            try {
+              findings = JSON.parse(fs.readFileSync('sast-findings.json', 'utf-8'));
+            } catch (e) { return; }
+
+            if (findings.length === 0) return;
+
+            const total = findings.length;
+            const errors = findings.filter(f => (f.extra?.severity || '').toUpperCase() === 'ERROR').length;
+            const warnings = findings.filter(f => (f.extra?.severity || '').toUpperCase() === 'WARNING').length;
+            const infos = total - errors - warnings;
+
+            let summary = [];
+            if (errors) summary.push(`🔴 ${errors} critical/high`);
+            if (warnings) summary.push(`🟡 ${warnings} medium`);
+            if (infos) summary.push(`🔵 ${infos} low/info`);
+
+            let table = '| Severity | Rule | File | Line |\n|---|---|---|---|\n';
+            for (const f of findings) {
+              const sev = (f.extra?.severity || 'INFO').toUpperCase();
+              const icon = sev === 'ERROR' ? '🔴' : sev === 'WARNING' ? '🟡' : '🔵';
+              const rule = (f.check_id || '?').split('.').pop().replace(/-/g, ' ');
+              const file = f.path || '?';
+              const line = f.start?.line || '?';
+              table += `| ${icon} ${sev} | ${rule} | \`${file}\` | L${line} |\n`;
+            }
+
+            const body = `## 🔍 SAST Scan — ${total} Vulnerabilidade(s) Detectada(s)
+
+            > **⛔ OpenGrep encontrou problemas de segurança nos arquivos alterados.**
+
+            ${summary.join(' · ')}
+
+            ### Findings
+
+            ${table}
+
+            ---
+
+            ### Como resolver:
+            1. **Corrija** as vulnerabilidades identificadas acima
+            2. Se um finding é **falso positivo**, marque na extensão da IDE e faça commit do \`.appsec-state/dismissed.json\`
+            3. Push na branch corrigida
+
+            ---
+            *🤖 Scan automático pelo AppSec (OpenGrep)*`.replace(/            /g, '');
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });

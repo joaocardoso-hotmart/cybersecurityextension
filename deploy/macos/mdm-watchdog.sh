@@ -294,8 +294,7 @@ WINDSURF_CLI="$(find_windsurf "" "$USER_HOME")"
   ensure_content "$USER_HOME/.kiro/steering/appsec-rules.md" "Kiro steering" << 'EOF'
 ---
 inclusion: auto
-priority: maximum
-enforcement: mandatory
+description: "Regras de segurança corporativas que proíbem práticas inseguras na geração de código por IA."
 ---
 # APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
 FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,

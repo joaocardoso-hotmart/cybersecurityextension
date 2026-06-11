@@ -86,20 +86,18 @@ function Get-ConsoleUserHome {
         if (Test-Path $home) { return $home }
     }
 
-    return $env:USERPROFILE
+    # Fallback: only use $env:USERPROFILE if it's NOT the SYSTEM profile
+    $profile = $env:USERPROFILE
+    if ($profile -notlike "*systemprofile*" -and $profile -notlike "*system32*") {
+        return $profile
+    }
+
+    return $null
 }
 
 # ── Certificate Pinning ───────────────────────────────────────────────────
 
 function Get-TrustedCaCerts {
-    <#
-    .SYNOPSIS
-        Extracts the corporate proxy CA from the Windows certificate store,
-        validates its thumbprint (SHA-256 equivalent), and returns the path
-        to a temporary PEM file. Returns $null if not found or invalid.
-    #>
-
-    # Search in LocalMachine\Root (Trusted Root CAs)
     $cert = Get-ChildItem -Path Cert:\LocalMachine\Root |
             Where-Object { $_.Subject -like "*CN=$TRUSTED_PROXY_CA_CN*" } |
             Select-Object -First 1
@@ -109,8 +107,6 @@ function Get-TrustedCaCerts {
         return $null
     }
 
-    # Validate thumbprint (SHA-1 thumbprint from Windows cert store for identification)
-    # For supply chain protection, we compute SHA-256 of the raw certificate
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     $certHash = [BitConverter]::ToString($sha256.ComputeHash($cert.RawData)).Replace("-", "")
 
@@ -118,12 +114,10 @@ function Get-TrustedCaCerts {
         Write-Host "  [SECURITY] CA fingerprint mismatch!" -ForegroundColor Red
         Write-Host "    Expected: $TRUSTED_PROXY_CA_THUMBPRINT" -ForegroundColor Red
         Write-Host "    Got:      $certHash" -ForegroundColor Red
-        Write-Host "  [SECURITY] Refusing to trust — possible supply chain attack" -ForegroundColor Red
         Write-Log "[SECURITY] CA fingerprint mismatch! Expected: $TRUSTED_PROXY_CA_THUMBPRINT Got: $certHash"
         return $null
     }
 
-    # Export to PEM
     $pemPath = Join-Path $env:TEMP "appsec-trusted-ca.pem"
     $b64 = [Convert]::ToBase64String($cert.RawData, [Base64FormattingOptions]::InsertLineBreaks)
     "-----BEGIN CERTIFICATE-----`n$b64`n-----END CERTIFICATE-----" | Set-Content $pemPath -Encoding ASCII
@@ -135,33 +129,38 @@ function Get-TrustedCaCerts {
 function Install-Extension([string]$Cli, [string]$Label) {
     if (-not (Test-Path $Cli)) { return }
 
-    # Get trusted CA cert for NODE_EXTRA_CA_CERTS
     $caPem = Get-TrustedCaCerts
-    $envVars = @{}
-    if ($caPem) { $envVars["NODE_EXTRA_CA_CERTS"] = $caPem }
 
     try {
         Write-Log "  Installing $Label via $Cli"
-
-        # Set env var temporarily
         if ($caPem) { $env:NODE_EXTRA_CA_CERTS = $caPem }
 
-        $existing = & $Cli --list-extensions 2>$null | Where-Object { $_ -ilike "*HotmartCybersecurity*" }
+        $listOutput = & $Cli --list-extensions 2>$null
+        $existing = $listOutput | Where-Object { $_ -ilike "*HotmartCybersecurity*" }
+
         if ($existing) {
             $output = & $Cli --install-extension $EXTENSION_ID --force 2>&1
-            $output | Add-Content -Path $DetailLog -Encoding UTF8
-            Write-Ok "$Label (updated)"
+            "$output" | Add-Content -Path $DetailLog -Encoding UTF8
+            if ($LASTEXITCODE -eq 0 -or "$output" -match "successfully") {
+                Write-Ok "$Label (updated)"
+            } else {
+                Write-Fail "$Label (update failed)"
+                Write-Log "  [ERROR] $Label update: $output"
+            }
         } else {
             $output = & $Cli --install-extension $EXTENSION_ID 2>&1
-            $output | Add-Content -Path $DetailLog -Encoding UTF8
-            Write-Ok "$Label (installed)"
+            "$output" | Add-Content -Path $DetailLog -Encoding UTF8
+            if ($LASTEXITCODE -eq 0 -or "$output" -match "successfully") {
+                Write-Ok "$Label (installed)"
+            } else {
+                Write-Fail "$Label (install failed)"
+                Write-Log "  [ERROR] $Label install: $output"
+            }
         }
     } catch {
         Write-Fail "$Label ($_)"
         Write-Log "  [ERROR] $Label : $_"
-        $_ | Add-Content -Path $DetailLog -Encoding UTF8
     } finally {
-        # Cleanup
         if ($caPem) {
             Remove-Item $caPem -Force -ErrorAction SilentlyContinue
             $env:NODE_EXTRA_CA_CERTS = $null
@@ -198,7 +197,7 @@ function Install-OpenGrep {
     # 2. Download from GitHub
     try {
         $api = Invoke-RestMethod "https://api.github.com/repos/opengrep/opengrep/releases/latest" -UseBasicParsing -TimeoutSec 15
-        $asset = $api.assets | Where-Object { $_.name -like "*windows*x86*" -or $_.name -like "*win*" } | Select-Object -First 1
+        $asset = $api.assets | Where-Object { $_.name -eq "opengrep_windows_x86.exe" } | Select-Object -First 1
         if ($asset) {
             $binDir = "C:\ProgramData\Hotmart\bin"
             $null = New-Item -ItemType Directory -Path $binDir -Force
@@ -217,33 +216,81 @@ function Install-OpenGrep {
 }
 
 # ── Write File (idempotent) ───────────────────────────────────────────────
+# Uses [System.IO.File]::WriteAllText to guarantee content is written.
+# Set-Content with -Encoding UTF8 adds BOM and can fail silently as SYSTEM.
 
 function Write-ConfigFile([string]$Dst, [string]$Label, [string]$Content) {
-    $null = New-Item -ItemType Directory -Path (Split-Path $Dst) -Force
-    if ((Test-Path $Dst) -and ((Get-Content $Dst -Raw -ErrorAction SilentlyContinue).Trim() -eq $Content.Trim())) {
-        Write-Skip "$Label (already up to date)"
-    } else {
-        $Content | Set-Content $Dst -Encoding UTF8
-        Write-Ok $Label
+    try {
+        if ([string]::IsNullOrWhiteSpace($Content)) {
+            Write-Fail "$Label (content is empty — bug in script)"
+            Write-Log "  [ERROR] $Label : content is empty"
+            return
+        }
+        if ([string]::IsNullOrWhiteSpace($Dst) -or $Dst -eq '\') {
+            Write-Fail "$Label (destination path is invalid: '$Dst')"
+            Write-Log "  [ERROR] $Label : invalid path '$Dst'"
+            return
+        }
+
+        $dir = Split-Path $Dst
+        if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path $dir)) {
+            $null = New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop
+        }
+
+        if (Test-Path $Dst) {
+            $existing = [System.IO.File]::ReadAllText($Dst, [System.Text.Encoding]::UTF8)
+            if ($existing.Trim() -eq $Content.Trim()) {
+                Write-Skip "$Label (already up to date)"
+                return
+            }
+        }
+
+        # Write without BOM using .NET directly
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($Dst, $Content, $utf8NoBom)
+
+        $size = (Get-Item $Dst -ErrorAction SilentlyContinue).Length
+        if ($size -gt 0) {
+            Write-Ok $Label
+            Write-Log "  [OK] Wrote $Label ($size bytes) to $Dst"
+        } else {
+            Write-Fail "$Label (file created but empty)"
+            Write-Log "  [ERROR] $Label : file at $Dst is empty after write"
+        }
+    } catch {
+        Write-Fail "$Label (error: $_)"
+        Write-Log "  [ERROR] $Label at $Dst : $_"
     }
 }
 
 # ── IDE Detection ─────────────────────────────────────────────────────────
+# All functions receive $UserHome as parameter to avoid dependency on
+# global scope (which may not be initialized when functions are defined).
 
-function Find-KiroCli {
+function Find-KiroCli([string]$UserHome) {
+    $localAppData = "$UserHome\AppData\Local"
     $paths = @(
-        "$env:LOCALAPPDATA\Programs\Kiro\bin\kiro.cmd",
-        "$env:LOCALAPPDATA\Programs\Kiro\bin\kiro.exe"
+        "$localAppData\Programs\Kiro\resources\app\bin\kiro.cmd",
+        "$localAppData\Programs\Kiro\bin\kiro.cmd",
+        "$localAppData\Programs\Kiro\bin\kiro.exe"
     )
     foreach ($p in $paths) { if (Test-Path $p) { return $p } }
+    foreach ($dir in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $dir) { continue }
+        $found = Get-ChildItem "$dir\Kiro*" -ErrorAction SilentlyContinue |
+                 ForEach-Object { Get-ChildItem $_.FullName -Recurse -Filter "kiro.cmd" -ErrorAction SilentlyContinue } |
+                 Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
     $cmd = Get-Command kiro -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     return $null
 }
 
-function Find-VscodeCli {
+function Find-VscodeCli([string]$UserHome) {
+    $localAppData = "$UserHome\AppData\Local"
     $paths = @(
-        "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd",
+        "$localAppData\Programs\Microsoft VS Code\bin\code.cmd",
         "$env:ProgramFiles\Microsoft VS Code\bin\code.cmd"
     )
     foreach ($p in $paths) { if (Test-Path $p) { return $p } }
@@ -252,10 +299,12 @@ function Find-VscodeCli {
     return $null
 }
 
-function Find-CursorCli {
+function Find-CursorCli([string]$UserHome) {
+    $localAppData = "$UserHome\AppData\Local"
     $paths = @(
-        "$env:LOCALAPPDATA\Programs\cursor\resources\app\bin\cursor.cmd",
-        "$env:LOCALAPPDATA\cursor\cursor.exe"
+        "$localAppData\Programs\cursor\resources\app\bin\cursor.cmd",
+        "$localAppData\Programs\Cursor\resources\app\bin\cursor.cmd",
+        "$localAppData\cursor\cursor.exe"
     )
     foreach ($p in $paths) { if (Test-Path $p) { return $p } }
     $cmd = Get-Command cursor -ErrorAction SilentlyContinue
@@ -263,10 +312,11 @@ function Find-CursorCli {
     return $null
 }
 
-function Find-WindsurfCli {
+function Find-WindsurfCli([string]$UserHome) {
+    $localAppData = "$UserHome\AppData\Local"
     $paths = @(
-        "$env:LOCALAPPDATA\Programs\Windsurf\bin\windsurf.cmd",
-        "$env:LOCALAPPDATA\Programs\Windsurf\windsurf.exe"
+        "$localAppData\Programs\Windsurf\bin\windsurf.cmd",
+        "$localAppData\Programs\Windsurf\windsurf.exe"
     )
     foreach ($p in $paths) { if (Test-Path $p) { return $p } }
     $cmd = Get-Command windsurf -ErrorAction SilentlyContinue
@@ -274,10 +324,12 @@ function Find-WindsurfCli {
     return $null
 }
 
-function Find-ClaudeCli {
+function Find-ClaudeCli([string]$UserHome) {
+    $appData = "$UserHome\AppData\Roaming"
     $paths = @(
-        "$env:APPDATA\npm\claude.cmd",
-        "$env:LOCALAPPDATA\Programs\claude\claude.exe"
+        "$appData\npm\claude.cmd",
+        "$UserHome\.local\bin\claude.exe",
+        "$UserHome\.claude\bin\claude.exe"
     )
     foreach ($p in $paths) { if (Test-Path $p) { return $p } }
     $cmd = Get-Command claude -ErrorAction SilentlyContinue
@@ -305,14 +357,18 @@ opengrep scan --quiet --config="$RULES_FILE" $STAGED 2>/dev/null || true
 exit 0
 '@
 
-    $searchDirs = @("$UserHome\Documents","$UserHome\projects","$UserHome\dev","$UserHome\workspace","$UserHome\repos","$UserHome\code","$UserHome\source")
+    $searchDirs = @(
+        "$UserHome\Documents", "$UserHome\projects", "$UserHome\dev",
+        "$UserHome\workspace", "$UserHome\repos", "$UserHome\code", "$UserHome\source"
+    )
     $count = 0
     foreach ($dir in $searchDirs) {
         if (-not (Test-Path $dir)) { continue }
         Get-ChildItem -Path $dir -Recurse -Depth 4 -Filter ".git" -Directory -ErrorAction SilentlyContinue | ForEach-Object {
             $hookDst = Join-Path $_.FullName "hooks\pre-commit"
-            $null = New-Item -ItemType Directory -Path (Split-Path $hookDst) -Force
-            $hookContent | Set-Content $hookDst -Encoding UTF8 -NoNewline
+            $null = New-Item -ItemType Directory -Path (Split-Path $hookDst) -Force -ErrorAction SilentlyContinue
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($hookDst, $hookContent, $utf8NoBom)
             $count++
         }
     }
@@ -384,6 +440,13 @@ $ClaudeSettings = @'
 }
 '@
 
+$ClaudeRules = @'
+# APPSEC SECURITY RULES — CORPORATE MANDATORY POLICY
+FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
+disabled TLS, tokens in localStorage, MD5/SHA1 for passwords, stack traces to client.
+Always use environment variables or a secret manager for credentials.
+'@
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
@@ -397,8 +460,17 @@ Write-Host ""
 "" | Add-Content -Path $DetailLog -Encoding UTF8
 "===== $(Get-Date) — mdm-install.ps1 started =====" | Add-Content -Path $DetailLog -Encoding UTF8
 "Running as: $([Environment]::UserName)" | Add-Content -Path $DetailLog -Encoding UTF8
+"IsSystem: $([System.Security.Principal.WindowsIdentity]::GetCurrent().IsSystem)" | Add-Content -Path $DetailLog -Encoding UTF8
 
+# Resolve user home FIRST — all other operations depend on this
 $UserHome = Get-ConsoleUserHome
+
+if ([string]::IsNullOrWhiteSpace($UserHome)) {
+    Write-Log "CRITICAL: Could not resolve user home directory. Aborting."
+    Write-Host "  [XX] Could not detect logged-in user home. Aborting." -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "User home: $UserHome" -ForegroundColor Cyan
 Write-Log "User home: $UserHome | Running as: $([Environment]::UserName)"
 "Resolved UserHome=$UserHome" | Add-Content -Path $DetailLog -Encoding UTF8
@@ -408,7 +480,7 @@ Write-Section "opengrep (SAST engine)"
 Install-OpenGrep
 
 # ── Kiro ──────────────────────────────────────────────────────────────────
-$KiroCli = Find-KiroCli
+$KiroCli = Find-KiroCli $UserHome
 if ($KiroCli) {
     Write-Section "Kiro ($KiroCli)"
     Install-Extension $KiroCli "Kiro extension"
@@ -417,14 +489,14 @@ if ($KiroCli) {
 } else { Write-Skip "Kiro (not detected)" }
 
 # ── VS Code ───────────────────────────────────────────────────────────────
-$VscodeCli = Find-VscodeCli
+$VscodeCli = Find-VscodeCli $UserHome
 if ($VscodeCli) {
     Write-Section "VS Code ($VscodeCli)"
     Install-Extension $VscodeCli "VS Code extension"
 } else { Write-Skip "VS Code (not detected)" }
 
 # ── Cursor ────────────────────────────────────────────────────────────────
-$CursorCli = Find-CursorCli
+$CursorCli = Find-CursorCli $UserHome
 if ($CursorCli) {
     Write-Section "Cursor ($CursorCli)"
     Install-Extension $CursorCli "Cursor extension"
@@ -433,7 +505,7 @@ if ($CursorCli) {
 } else { Write-Skip "Cursor (not detected)" }
 
 # ── Windsurf ──────────────────────────────────────────────────────────────
-$WindsurfCli = Find-WindsurfCli
+$WindsurfCli = Find-WindsurfCli $UserHome
 if ($WindsurfCli) {
     Write-Section "Windsurf ($WindsurfCli)"
     Install-Extension $WindsurfCli "Windsurf extension"
@@ -442,15 +514,15 @@ if ($WindsurfCli) {
 } else { Write-Skip "Windsurf (not detected)" }
 
 # ── Claude Code ───────────────────────────────────────────────────────────
-$ClaudeCli = Find-ClaudeCli
+$ClaudeCli = Find-ClaudeCli $UserHome
 if ($ClaudeCli) {
     Write-Section "Claude Code ($ClaudeCli)"
     $claudeDir = "$UserHome\.claude"
     $settingsFile = "$claudeDir\settings.json"
-    if (-not (Test-Path $settingsFile) -or (Get-Content $settingsFile -Raw) -notlike "*appsec-gate*") {
+    if (-not (Test-Path $settingsFile) -or (Get-Content $settingsFile -Raw -ErrorAction SilentlyContinue) -notlike "*appsec-gate*") {
         Write-ConfigFile $settingsFile "Claude settings.json" $ClaudeSettings
     } else { Write-Skip "Claude settings.json (already configured)" }
-    Write-ConfigFile "$claudeDir\rules\appsec-rules.md" "Claude rules" $ClaudeSettings
+    Write-ConfigFile "$claudeDir\rules\appsec-rules.md" "Claude rules" $ClaudeRules
     Write-ConfigFile "$claudeDir\appsec\appsec-gate.sh" "Claude appsec-gate" $AppsecGateSh
 } else { Write-Skip "Claude Code (not detected)" }
 
