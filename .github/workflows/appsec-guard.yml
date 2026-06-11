@@ -39,8 +39,16 @@ jobs:
 
           for file in "${PROTECTED_FILES[@]}"; do
             if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${file}$"; then
-              HAS_VIOLATION="true"
-              CHANGED_FILES="${CHANGED_FILES}${file}\n"
+              # Check if the file is being ADDED (new) or MODIFIED (existing)
+              # Only block modifications, not initial creation by the extension
+              if git show origin/${{ github.base_ref }}:"${file}" &>/dev/null; then
+                # File exists in base branch → this is a MODIFICATION → block
+                HAS_VIOLATION="true"
+                CHANGED_FILES="${CHANGED_FILES}${file}\n"
+              else
+                # File does NOT exist in base branch → this is a CREATION → allow
+                echo "  ℹ️  ${file} is being created (first time) — allowed"
+              fi
             fi
           done
 
