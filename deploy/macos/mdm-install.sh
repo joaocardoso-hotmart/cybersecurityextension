@@ -272,7 +272,7 @@ STATE_DIR=".appsec-state"
 DISMISSED_FILE="$STATE_DIR/dismissed.json"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
+STAGED_FILES=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
 [ -z "$STAGED_FILES" ] && exit 0
 if [ ! -f "$RULES_FILE" ]; then
   GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)

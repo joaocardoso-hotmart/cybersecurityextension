@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { SecurityFinding, Severity, scanChangedLines } from './scanner';
+import { SecurityFinding, Severity, scanChangedLines, scanActiveFile, scanAllWorkspaceFiles } from './scanner';
 
 export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'cybersecurity.findingsView';
@@ -69,7 +69,22 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 	public async refresh(): Promise<void> {
 		if (this._view) {
 			this._view.webview.html = this._getLoadingHtml();
-			this._findings = await scanChangedLines();
+			// Scan manual: scans active file + all changed files
+			const [activeFindings, changedFindings] = await Promise.all([
+				scanActiveFile(),
+				scanChangedLines()
+			]);
+			// Merge and deduplicate by file+line+id
+			const seen = new Set<string>();
+			const merged: SecurityFinding[] = [];
+			for (const f of [...activeFindings, ...changedFindings]) {
+				const key = `${f.file}:${f.line}:${f.id}`;
+				if (!seen.has(key)) {
+					seen.add(key);
+					merged.push(f);
+				}
+			}
+			this._findings = merged;
 			this._view.webview.html = this._getHtmlForWebview();
 		}
 	}

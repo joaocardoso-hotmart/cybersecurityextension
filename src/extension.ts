@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { execSync } from 'child_process';
 import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
 import { ensureOpenGrep } from './semgrep';
@@ -784,6 +785,12 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 		return;
 	}
 
+	// Capture the initial staged files snapshot so we can detect real staging changes
+	let lastStagedSnapshot = '';
+	try {
+		lastStagedSnapshot = execSync('git diff --cached --name-only', { cwd: workspaceFolder, encoding: 'utf-8' });
+	} catch { /* */ }
+
 	// Capture the current index mtime at activation so we don't trigger on reload
 	let lastIndexMtime = 0;
 	try {
@@ -803,6 +810,20 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 			clearTimeout(debounceTimer);
 		}
 		debounceTimer = setTimeout(() => {
+			// Verify that the staging area actually changed before scanning.
+			// The IDE's built-in git extension refreshes the index frequently without
+			// the user running `git add`, which causes false triggers.
+			let currentStaged = '';
+			try {
+				currentStaged = execSync('git diff --cached --name-only', { cwd: workspaceFolder, encoding: 'utf-8' });
+			} catch { /* */ }
+
+			if (currentStaged === lastStagedSnapshot) {
+				// Staging area didn't change — skip scan (IDE internal refresh)
+				return;
+			}
+			lastStagedSnapshot = currentStaged;
+
 			onGitOperation(sidebarProvider);
 		}, 1200);
 	};
@@ -813,15 +834,12 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 
 		// Trigger on:
 		//   - index            → git add / git reset (staging changes)
-		//   - index.lock        → git is mid-write of the index (covers fast `git add`)
 		//   - COMMIT_EDITMSG    → git commit
-		if (filename !== 'index' && filename !== 'index.lock' && filename !== 'COMMIT_EDITMSG') {
+		if (filename !== 'index' && filename !== 'COMMIT_EDITMSG') {
 			return;
 		}
 
-		// For index changes, confirm the index was actually rewritten by comparing the
-		// modification time (always advances on a real write — unlike the byte size, which
-		// frequently stays identical when re-staging the same file).
+		// For index changes, confirm the index was actually rewritten by comparing mtime
 		if (filename === 'index') {
 			try {
 				const stat = fs.statSync(path.join(gitDir, 'index'));

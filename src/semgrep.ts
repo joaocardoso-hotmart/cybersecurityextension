@@ -139,7 +139,14 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 	try {
 		// Build absolute file paths (passed as separate argv entries — no shell interpolation,
 		// so filenames with parentheses, spaces or other special chars work correctly).
-		const filePaths = files.map(f => path.join(workspaceFolder, f));
+		// Filter out files that no longer exist on disk (e.g. deleted files from git diff).
+		const filePaths = files
+			.map(f => path.join(workspaceFolder, f))
+			.filter(f => fs.existsSync(f));
+
+		if (filePaths.length === 0) {
+			return [];
+		}
 
 		// Use local rules bundled with the extension
 		let rulesPath = path.join(extensionPath, 'rules', 'security.yml');

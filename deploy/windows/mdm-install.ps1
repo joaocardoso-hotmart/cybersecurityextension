@@ -346,7 +346,7 @@ function Install-PreCommitHooks([string]$UserHome) {
 STATE_DIR=".appsec-state"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"
-STAGED=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
+STAGED=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
 [ -z "$STAGED" ] && exit 0
 if [ ! -f "$RULES_FILE" ]; then
   GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)

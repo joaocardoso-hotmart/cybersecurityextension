@@ -209,7 +209,7 @@ function Ensure-PreCommitHooks([string]$UserHome) {
     $hookContent = @'
 #!/bin/bash
 # AppSec Pre-Commit Hook — Advisory Only
-STAGED=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php)$')
+STAGED=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php)$')
 [ -z "$STAGED" ] && exit 0
 command -v opengrep &>/dev/null || exit 0
 opengrep scan --quiet --config="rules/security.yml" $STAGED 2>/dev/null || true
