@@ -11,7 +11,7 @@ app.post('/calcular', (req, res) => {
     const expressao = req.body.expressao;
 
     if (!expressao) {
-        return res.status(400).send("Por favr, forneça uma 'expressao'.");
+        return res.status(400).send("Porfavor, forneça uma 'expressao'.");
     }
 
     try {

@@ -78,6 +78,13 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 	context.subscriptions.push(dismissCmd);
 
+	// Command to mark a finding as fixed
+	const markFixedCmd = vscode.commands.registerCommand(
+		'cybersecurityextension.markFindingFixed',
+		(...args: unknown[]) => markFindingFixed(args[0], sidebarProvider)
+	);
+	context.subscriptions.push(markFixedCmd);
+
 	// Register hover provider for security findings
 	context.subscriptions.push(
 		vscode.languages.registerHoverProvider('*', new SecurityHoverProvider())
@@ -679,20 +686,19 @@ function buildFixPrompt(finding: {
 	suggestedFix: string | null;
 	snippet: string;
 }): string {
-	let prompt = `🛡️ **Correção de Segurança — ${finding.cwe}**\n\n`;
-	prompt += `**Vulnerabilidade encontrada:** ${finding.title}\n`;
-	prompt += `**Arquivo:** ${finding.file}, linha ${finding.line}\n`;
-	prompt += `**Código vulnerável:**\n\`\`\`\n${finding.snippet}\n\`\`\`\n\n`;
-	prompt += `**Problema:** ${finding.description}\n\n`;
-	prompt += `**Como corrigir:** ${finding.suggestion}\n\n`;
+	let prompt = `Corrija APENAS a vulnerabilidade ${finding.cwe} (${finding.title}) no arquivo \`${finding.file}\` linha ${finding.line}.\n\n`;
+	prompt += `Código vulnerável:\n\`\`\`\n${finding.snippet}\n\`\`\`\n\n`;
+	prompt += `Correção: ${finding.suggestion}\n`;
 
 	if (finding.suggestedFix) {
-		prompt += `**Correção sugerida:**\n\`\`\`\n${finding.suggestedFix}\n\`\`\`\n\n`;
+		prompt += `\nExemplo de fix:\n\`\`\`\n${finding.suggestedFix}\n\`\`\`\n`;
 	}
 
-	prompt += `Por favor, aplique essa correção no arquivo \`${finding.file}\` na linha ${finding.line}. `;
-	prompt += `Explique brevemente por que essa mudança é necessária do ponto de vista de segurança `;
-	prompt += `e garanta que a correção não quebre a funcionalidade existente.`;
+	prompt += `\nRegras:\n`;
+	prompt += `- Altere SOMENTE a linha/trecho vulnerável. Não reescreva o resto do código.\n`;
+	prompt += `- Mantenha a lógica e estrutura existentes intactas.\n`;
+	prompt += `- Não adicione comentários, logs ou código extra desnecessário.\n`;
+	prompt += `- A correção deve ser mínima e cirúrgica.`;
 
 	return prompt;
 }
@@ -718,6 +724,22 @@ async function dismissFinding(findingArg: unknown, sidebarProvider: SecuritySide
 		}
 	}
 
+	// Sync: merge currentFindings with sidebar's findings to ensure we have the full picture.
+	// The sidebar may have findings from manual scan that currentFindings doesn't have, and vice versa.
+	if (currentFindings.length === 0 && sidebarProvider.findings.length > 0) {
+		currentFindings = [...sidebarProvider.findings];
+	} else if (sidebarProvider.findings.length > 0) {
+		// Merge sidebar findings into currentFindings (deduplicate by id+file+line)
+		const seen = new Set(currentFindings.map(f => `${f.id}:${f.file}:${f.line}`));
+		for (const f of sidebarProvider.findings) {
+			const key = `${f.id}:${f.file}:${f.line}`;
+			if (!seen.has(key)) {
+				currentFindings.push(f);
+				seen.add(key);
+			}
+		}
+	}
+
 	// Remove from current findings
 	currentFindings = currentFindings.filter(f =>
 		!(f.id === findingInfo.id && f.file === findingInfo.file && f.line === findingInfo.line)
@@ -731,6 +753,53 @@ async function dismissFinding(findingArg: unknown, sidebarProvider: SecuritySide
 	sidebarProvider.updateFindings(currentFindings);
 
 	vscode.window.showInformationMessage(`🛡️ Finding ignorado como falso positivo.`);
+}
+
+// ─── MARK FINDING AS FIXED ────────────────────────────────────────────────────
+
+async function markFindingFixed(findingArg: unknown, sidebarProvider: SecuritySidebarProvider): Promise<void> {
+	let findingInfo: { id: string; file: string; line: number };
+
+	try {
+		if (typeof findingArg === 'string') {
+			findingInfo = JSON.parse(findingArg);
+		} else if (typeof findingArg === 'object' && findingArg !== null) {
+			findingInfo = findingArg as typeof findingInfo;
+		} else {
+			throw new Error('Invalid');
+		}
+	} catch {
+		try {
+			findingInfo = JSON.parse(decodeURIComponent(String(findingArg)));
+		} catch {
+			return;
+		}
+	}
+
+	// Sync findings sources
+	if (currentFindings.length === 0 && sidebarProvider.findings.length > 0) {
+		currentFindings = [...sidebarProvider.findings];
+	} else if (sidebarProvider.findings.length > 0) {
+		const seen = new Set(currentFindings.map(f => `${f.id}:${f.file}:${f.line}`));
+		for (const f of sidebarProvider.findings) {
+			const key = `${f.id}:${f.file}:${f.line}`;
+			if (!seen.has(key)) {
+				currentFindings.push(f);
+				seen.add(key);
+			}
+		}
+	}
+
+	// Remove from current findings
+	currentFindings = currentFindings.filter(f =>
+		!(f.id === findingInfo.id && f.file === findingInfo.file && f.line === findingInfo.line)
+	);
+
+	// Update diagnostics and sidebar
+	updateDiagnostics(currentFindings);
+	sidebarProvider.updateFindings(currentFindings);
+
+	vscode.window.showInformationMessage(`✅ Vulnerabilidade corrigida.`);
 }
 
 /**
@@ -798,34 +867,50 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 		lastIndexMtime = stat.mtimeMs;
 	} catch { /* */ }
 
-	// Grace period: ignore all events in the first 5 seconds after activation
+	// Grace period: ignore all events in the first 2 seconds after activation
 	// to avoid triggering on reload/startup
 	let ready = false;
-	const readyTimer = setTimeout(() => { ready = true; }, 5000);
+	const readyTimer = setTimeout(() => { ready = true; }, 2000);
 
 	let debounceTimer: NodeJS.Timeout | undefined;
+	let scanPending = false;
 
 	const triggerScan = () => {
+		scanPending = true;
 		if (debounceTimer) {
 			clearTimeout(debounceTimer);
 		}
 		debounceTimer = setTimeout(() => {
-			// Verify that the staging area actually changed before scanning.
-			// The IDE's built-in git extension refreshes the index frequently without
-			// the user running `git add`, which causes false triggers.
+			if (!scanPending) { return; }
+			scanPending = false;
+
+			// Check current state of the working tree
 			let currentStaged = '';
 			try {
 				currentStaged = execSync('git diff --cached --name-only', { cwd: workspaceFolder, encoding: 'utf-8' });
 			} catch { /* */ }
 
-			if (currentStaged === lastStagedSnapshot) {
-				// Staging area didn't change — skip scan (IDE internal refresh)
+			let currentUnstaged = '';
+			try {
+				currentUnstaged = execSync('git diff --name-only --diff-filter=d', { cwd: workspaceFolder, encoding: 'utf-8' });
+			} catch { /* */ }
+
+			// If there's absolutely nothing to scan (clean tree), skip
+			if (currentStaged === '' && currentUnstaged === '') {
+				lastStagedSnapshot = '';
 				return;
 			}
-			lastStagedSnapshot = currentStaged;
 
+			// If the staged snapshot is identical AND no unstaged changes exist,
+			// this is likely an IDE internal refresh — skip
+			if (currentStaged === lastStagedSnapshot && currentUnstaged === '') {
+				return;
+			}
+
+			// Something changed — run the scan
+			lastStagedSnapshot = currentStaged;
 			onGitOperation(sidebarProvider);
-		}, 1200);
+		}, 800);
 	};
 
 	const watcher = fs.watch(gitDir, (eventType, filename) => {

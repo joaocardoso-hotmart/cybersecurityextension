@@ -55,6 +55,13 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 						line: message.line,
 					}));
 					break;
+				case 'markFixed':
+					await vscode.commands.executeCommand('cybersecurityextension.markFindingFixed', JSON.stringify({
+						id: message.id,
+						file: message.file,
+						line: message.line,
+					}));
+					break;
 			}
 		});
 
@@ -334,6 +341,11 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			color: var(--vscode-button-foreground);
 		}
 		.fix-btn:hover { opacity: 0.85; }
+		.fixed-btn {
+			background: #388e3c;
+			color: #fff;
+		}
+		.fixed-btn:hover { opacity: 0.85; }
 		.dismiss-btn {
 			background: transparent;
 			border: 1px solid var(--vscode-foreground);
@@ -391,6 +403,10 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 		function dismiss(id, file, line) {
 			vscode.postMessage({ command: 'dismiss', id, file, line });
 		}
+
+		function markFixed(id, file, line) {
+			vscode.postMessage({ command: 'markFixed', id, file, line });
+		}
 	</script>
 </body>
 </html>`;
@@ -421,6 +437,7 @@ export class SecuritySidebarProvider implements vscode.WebviewViewProvider {
 			</div>
 			<div class="finding-actions">
 				<button class="action-btn fix-btn" onclick="fixWithAI('${this._escapeJs(finding.file)}', ${finding.line}, '${this._escapeJs(finding.title)}', '${this._escapeJs(finding.cwe)}', '${this._escapeJs(finding.description)}', '${this._escapeJs(finding.suggestion)}', '${this._escapeJs(finding.snippet)}')">📋 Copiar prompt de correção</button>
+				<button class="action-btn fixed-btn" onclick="markFixed('${this._escapeJs(finding.id)}', '${this._escapeJs(finding.file)}', ${finding.line})">✓ Corrigida</button>
 				<button class="action-btn dismiss-btn" onclick="dismiss('${this._escapeJs(finding.id)}', '${this._escapeJs(finding.file)}', ${finding.line})">✕ Falso Positivo</button>
 			</div>
 		</div>
