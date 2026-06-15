@@ -515,16 +515,20 @@ main() {
     section "Kiro ($KIRO_CLI)"
     install_extension "$KIRO_CLI" "Kiro extension"
 
-    write_file "$USER_HOME/.kiro/steering/appsec-rules.md" "Kiro steering" << 'EOF'
+    mkdir -p "$USER_HOME/.kiro/steering"
+    cat > "$USER_HOME/.kiro/steering/appsec-rules.md" << 'EOF'
 ---
 inclusion: auto
 description: "Regras de segurança corporativas que proíbem práticas inseguras na geração de código por IA."
 ---
 # APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
+
 This assistant MUST always generate secure-by-default code.
 FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
 disabled TLS, tokens in localStorage, MD5/SHA1 for passwords, stack traces to client.
+Always use environment variables or a secret manager for credentials.
 EOF
+    ok "Kiro steering"
 
     write_file "$USER_HOME/.kiro/hooks/appsec-gate.kiro.hook" "Kiro hook" << 'EOF'
 {

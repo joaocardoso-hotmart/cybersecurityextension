@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import { execSync } from 'child_process';
 import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
-import { ensureOpenGrep } from './semgrep';
+import { ensureOpenGrep, runOpenGrep } from './semgrep';
 
 const CLAUDE_FILES = {
 	rules: ['appsec-rules.md'],
@@ -97,6 +97,9 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
+	// Watch for file saves — re-scan to auto-remove fixed findings
+	registerFileSaveWatcher(context, sidebarProvider);
+
 	// Watch for git operations (commit / staging)
 	registerGitWatcher(context, sidebarProvider);
 
@@ -106,6 +109,9 @@ export function activate(context: vscode.ExtensionContext) {
 	// Detect install/update of the extension to force hook re-installation
 	const installState = detectInstallOrUpdate(context);
 	const force = installState !== 'none';
+
+	// Fix global steering file if it exists but is missing description (legacy MDM installs)
+	ensureGlobalSteeringFile(context);
 
 	// Auto-apply steering files on workspace open
 	autoApplyIfNeeded(context, force).catch(err => {
@@ -164,6 +170,79 @@ function detectInstallOrUpdate(context: vscode.ExtensionContext): 'install' | 'u
 	}
 
 	return 'none';
+}
+
+/**
+ * Ensures the global (user-level) Kiro steering file at ~/.kiro/steering/appsec-rules.md
+ * has the required front-matter with `description`. Legacy MDM installs may have written
+ * this file without the field, causing Kiro to show a "Progressive steering file missing
+ * description" warning.
+ *
+ * Only runs when the IDE is Kiro. Overwrites only if the file exists but lacks `description`.
+ */
+function ensureGlobalSteeringFile(context: vscode.ExtensionContext): void {
+	if (detectIDE() !== 'kiro') { return; }
+
+	const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+	if (!homeDir) { return; }
+
+	const globalSteering = path.join(homeDir, '.kiro', 'steering', 'appsec-rules.md');
+
+	if (!fs.existsSync(globalSteering)) { return; }
+
+	try {
+		const content = fs.readFileSync(globalSteering, 'utf-8');
+
+		// Check if it has a front-matter block with description
+		const frontMatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+		if (!frontMatterMatch) {
+			// No front-matter at all — rewrite with proper content
+			writeGlobalSteering(globalSteering, context);
+			return;
+		}
+
+		const frontMatter = frontMatterMatch[1];
+		if (!frontMatter.includes('description:')) {
+			// Has front-matter but missing description — rewrite
+			writeGlobalSteering(globalSteering, context);
+			return;
+		}
+
+		// description exists — check it's not empty
+		const descMatch = frontMatter.match(/description:\s*["']?(.*)["']?/);
+		if (descMatch && descMatch[1].trim().length === 0) {
+			writeGlobalSteering(globalSteering, context);
+		}
+	} catch (err) {
+		console.error('[Hotmart AppSec] ensureGlobalSteeringFile error:', err);
+	}
+}
+
+function writeGlobalSteering(filePath: string, context: vscode.ExtensionContext): void {
+	// Use the bundled source file if available, otherwise write inline
+	const sourceFile = path.join(context.extensionPath, 'standards', 'kiro', 'steering', 'appsec-rules.md');
+
+	if (fs.existsSync(sourceFile)) {
+		const sourceContent = fs.readFileSync(sourceFile, 'utf-8');
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, sourceContent, 'utf-8');
+	} else {
+		// Inline fallback
+		const content = `---
+inclusion: auto
+description: "Regras de segurança corporativas que proíbem práticas inseguras na geração de código por IA."
+---
+# APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
+
+This assistant MUST always generate secure-by-default code.
+FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
+disabled TLS, tokens in localStorage, MD5/SHA1 for passwords, stack traces to client.
+Always use environment variables or a secret manager for credentials.
+`;
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, content, 'utf-8');
+	}
+	console.log(`[Hotmart AppSec] Global steering file fixed: ${filePath}`);
 }
 
 function ensureSecurityHookAllWorkspaces(context: vscode.ExtensionContext, force: boolean): void {
@@ -839,6 +918,51 @@ function persistDismissal(findingInfo: { id: string; file: string; line: number 
 		});
 		fs.writeFileSync(dismissedFile, JSON.stringify(dismissed, null, 2), 'utf-8');
 	}
+}
+
+// ─── FILE SAVE WATCHER (auto-remove fixed findings) ──────────────────────────
+
+function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
+	let rescanTimer: NodeJS.Timeout | undefined;
+
+	const listener = vscode.workspace.onDidSaveTextDocument((document) => {
+		const filePath = vscode.workspace.asRelativePath(document.uri);
+
+		// Only re-scan if we have active findings for this file
+		const hasFindings = currentFindings.some(f => f.file === filePath);
+		if (!hasFindings) {
+			return;
+		}
+
+		// Debounce to avoid hammering the scanner on rapid saves
+		if (rescanTimer) {
+			clearTimeout(rescanTimer);
+		}
+
+		rescanTimer = setTimeout(async () => {
+			try {
+				const workspaceFolders = vscode.workspace.workspaceFolders;
+				if (!workspaceFolders) { return; }
+
+				const workspaceFolder = workspaceFolders[0].uri.fsPath;
+
+				// Re-scan only the saved file
+				const freshFindings = await runOpenGrep([filePath], workspaceFolder, context.extensionPath);
+
+				// Remove old findings for this file and replace with fresh ones
+				const otherFindings = currentFindings.filter(f => f.file !== filePath);
+				currentFindings = [...otherFindings, ...freshFindings];
+
+				// Update diagnostics and sidebar
+				updateDiagnostics(currentFindings);
+				sidebarProvider.updateFindings(currentFindings);
+			} catch (err) {
+				console.error('[Hotmart AppSec] File save re-scan error:', err);
+			}
+		}, 500);
+	});
+
+	context.subscriptions.push(listener);
 }
 
 // ─── GIT WATCHER (triggers scan on commit/stage) ─────────────────────────────
