@@ -2,7 +2,7 @@
   "name": "cybersecurityextension",
   "displayName": "Hotmart Cybersecurity",
   "description": "Distribui e aplica padrões de segurança corporativos para AI IDEs (Kiro, Cursor, VS Code)",
-  "version": "0.7.9",
+  "version": "0.8.1",
   "publisher": "HotmartCybersecurity",
   "license": "MIT",
   "icon": "media/icon.png",
