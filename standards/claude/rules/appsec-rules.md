@@ -1,6 +1,5 @@
 ---
-inclusion: auto
-description: "Regras de segurança corporativas que proíbem práticas inseguras na geração de código por IA."
+inclusion: always
 priority: 0
 enforcement: mandatory
 scope: global

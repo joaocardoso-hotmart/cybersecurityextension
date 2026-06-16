@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="2.8.0"
+VERSION="2.9.4"
 PKG_ID="com.hotmart.appsec"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -96,6 +96,15 @@ cp "$SCRIPT_DIR/mdm-uninstall.sh" "$BUILD_DIR/payload/Library/Application Suppor
 
 echo -e "  ${G}✓${N} Copiando LaunchDaemon plist"
 cp "$SCRIPT_DIR/com.hotmart.appsec.watchdog.plist" "$BUILD_DIR/payload/Library/LaunchDaemons/"
+
+# ── Bundled .vsix (para instalar sem internet/marketplace) ───────────────
+VSIX_FILE="$(ls "$PROJECT_DIR"/cybersecurityextension-*.vsix 2>/dev/null | sort -V | tail -1)"
+if [ -n "$VSIX_FILE" ] && [ -f "$VSIX_FILE" ]; then
+  cp "$VSIX_FILE" "$BUILD_DIR/payload/Library/Application Support/Hotmart/appsec/extension.vsix"
+  echo -e "  ${G}✓${N} Bundled .vsix ($(basename "$VSIX_FILE"))"
+else
+  echo -e "  ${Y}!${N} No .vsix found — extension will be installed from marketplace (requires internet)"
+fi
 
 # ── Post-install script ──────────────────────────────────────────────────────
 

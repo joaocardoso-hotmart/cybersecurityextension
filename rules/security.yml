@@ -3024,3 +3024,220 @@ rules:
     metadata:
       cwe: ["CWE-778"]
       fix: "Habilite logging/audit trails para compliance e detecção de incidentes."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # PHP RULES — SQL Injection, Hardcoded Credentials, Command Injection
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: php-sql-injection-variable-in-query
+    patterns:
+      - pattern: $CONN->query("...$VAR...")
+    message: "SQL Injection em PHP. Use prepared statements com bind_param()."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Use $stmt = $conn->prepare('SELECT * FROM users WHERE username = ?'); $stmt->bind_param('s', $username);"
+
+  - id: php-sql-injection-concat
+    patterns:
+      - pattern-either:
+          - pattern: $CONN->query("..." . $VAR . "...")
+          - pattern: $CONN->query("..." . $_GET[$KEY] . "...")
+          - pattern: $CONN->query("..." . $_POST[$KEY] . "...")
+          - pattern: $CONN->query("..." . $_REQUEST[$KEY] . "...")
+    message: "SQL Injection via concatenação em PHP. Use prepared statements."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Use prepared statements: $stmt = $conn->prepare($sql); $stmt->bind_param(...);"
+
+  - id: php-hardcoded-password
+    patterns:
+      - pattern-either:
+          - pattern: $db_password = "..."
+          - pattern: $password = "..."
+          - pattern: $db_pass = "..."
+          - pattern: $secret = "..."
+          - pattern: $api_key = "..."
+          - pattern: $token = "..."
+    message: "Credencial hardcoded em PHP. Use variáveis de ambiente."
+    languages: [php]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Use getenv('DB_PASSWORD') ou variáveis de ambiente."
+
+  - id: php-die-connect-error
+    pattern: die("..." . $CONN->connect_error)
+    message: "Erro de conexão exposto ao usuário. Use mensagem genérica e logue internamente."
+    languages: [php]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-209"]
+      fix: "Logue o erro e retorne mensagem genérica: die('Erro interno. Tente novamente.');"
+
+  - id: php-direct-user-input
+    patterns:
+      - pattern-either:
+          - pattern: $... = $_GET[$KEY]
+          - pattern: $... = $_POST[$KEY]
+          - pattern: $... = $_REQUEST[$KEY]
+    message: "Input do usuário usado sem sanitização. Valide e sanitize antes de usar."
+    languages: [php]
+    severity: WARNING
+    metadata:
+      cwe: ["CWE-20"]
+      fix: "Use filter_input(INPUT_GET, 'param', FILTER_SANITIZE_STRING) ou validação adequada."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # NoSQL INJECTION (MongoDB — TypeScript/JavaScript)
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: nosql-injection-findone
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $MODEL.findOne({ $FIELD: $REQ.body.$PROP })
+          - pattern: |
+              $MODEL.findOne({ $FIELD: req.body.$PROP })
+          - pattern: |
+              $MODEL.find({ $FIELD: $REQ.body.$PROP })
+          - pattern: |
+              $MODEL.find({ $FIELD: req.body.$PROP })
+          - pattern: |
+              $MODEL.findOne({ $FIELD: $VAR })
+    message: "NoSQL Injection. Input do usuário passado diretamente para query MongoDB permite operadores maliciosos. Valide o tipo antes."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-943"]
+      fix: "Valide que o input é uma string antes de usar na query: if (typeof username !== 'string') throw new Error('Invalid input');"
+
+  - id: nosql-injection-destructured
+    patterns:
+      - pattern: |
+          const { ..., $FIELD, ... } = req.body
+          ...
+          $MODEL.findOne({ $FIELD: $FIELD })
+    message: "NoSQL Injection via body destructuring. O campo pode conter operadores MongoDB maliciosos. Valide o tipo."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-943"]
+      fix: "Valide o tipo: if (typeof field !== 'string') return res.status(400).send('Invalid');"
+
+  - id: nosql-injection-deleteone
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $MODEL.deleteOne({ $FIELD: $REQ.body.$PROP })
+          - pattern: |
+              $MODEL.deleteMany({ $FIELD: $REQ.body.$PROP })
+          - pattern: |
+              $MODEL.updateOne({ $FIELD: $REQ.body.$PROP }, ...)
+          - pattern: |
+              $MODEL.updateMany({ $FIELD: $REQ.body.$PROP }, ...)
+    message: "NoSQL Injection em operação destrutiva. Input não validado pode afetar múltiplos documentos."
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-943"]
+      fix: "Valide que os campos são strings/números primitivos antes de usar em queries."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # PYTHON RULES — SQL Injection, Hardcoded Credentials
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: python-sql-injection-format
+    patterns:
+      - pattern-either:
+          - pattern: $CURSOR.execute(f"...{$VAR}...")
+          - pattern: $CURSOR.execute("..." + $VAR + "...")
+          - pattern: $CURSOR.execute("...%s..." % $VAR)
+          - pattern: $CURSOR.execute("...{}...".format($VAR))
+    message: "SQL Injection em Python. Use parameterized queries."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Use cursor.execute('SELECT * FROM users WHERE id = %s', (user_id,))"
+
+  - id: python-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|secret|api_key|token|private_key|db_password|db_pass|access_key|secret_key)
+    message: "Credencial hardcoded em Python. Use variáveis de ambiente."
+    languages: [python]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Use os.environ.get('SECRET_NAME') ou um secret manager."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JAVA RULES — SQL Injection, Hardcoded Credentials
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: java-sql-injection-concat
+    patterns:
+      - pattern-either:
+          - pattern: $STMT.executeQuery("..." + $VAR + "...")
+          - pattern: $STMT.execute("..." + $VAR + "...")
+          - pattern: $CONN.createStatement().executeQuery("..." + $VAR + "...")
+    message: "SQL Injection em Java. Use PreparedStatement com placeholders."
+    languages: [java]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Use PreparedStatement: conn.prepareStatement('SELECT * FROM users WHERE id = ?')"
+
+  - id: java-hardcoded-password
+    patterns:
+      - pattern-either:
+          - pattern: String $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|secret|apiKey|token|privateKey|dbPassword|accessKey|secretKey)
+    message: "Credencial hardcoded em Java. Use variáveis de ambiente ou vault."
+    languages: [java]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-798"]
+      fix: "Use System.getenv('SECRET_NAME') ou um secret manager como HashiCorp Vault."
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # GO RULES — SQL Injection, Hardcoded Credentials
+  # ═══════════════════════════════════════════════════════════════════════════════
+
+  - id: go-sql-injection-sprintf
+    patterns:
+      - pattern-either:
+          - pattern: $DB.Query(fmt.Sprintf("...", $VAR))
+          - pattern: $DB.Exec(fmt.Sprintf("...", $VAR))
+          - pattern: $DB.QueryRow(fmt.Sprintf("...", $VAR))
+          - pattern: $DB.Query("..." + $VAR + "...")
+    message: "SQL Injection em Go. Use placeholders ($1, ?)."
+    languages: [go]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Use db.Query('SELECT * FROM users WHERE id = $1', userID)"
+
+  - id: go-hardcoded-secret
+    patterns:
+      - pattern-either:
+          - pattern: $VAR := "..."
+          - pattern: var $VAR = "..."
+      - metavariable-regex:
+          metavariable: $VAR
+          regex: (?i)(password|passwd|secret|apiKey|token|privateKey|dbPassword|accessKey|secretKey)
+    message: "Credencial hardcoded em Go. Use variáveis de ambiente."
+    languages: [go]
+    severity: ERROR
+    metadata:
+      cwe: ["CWE-89"]
+      fix: "Use os.Getenv('SECRET_NAME')"

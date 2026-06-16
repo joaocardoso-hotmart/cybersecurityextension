@@ -183,7 +183,7 @@ STATE_DIR=".appsec-state"
 DISMISSED_FILE="$STATE_DIR/dismissed.json"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE '\''\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$'\'')
+STAGED_FILES=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | grep -iE '\''\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$'\'')
 [ -z "$STAGED_FILES" ] && exit 0
 if [ ! -f "$RULES_FILE" ]; then
   GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -291,17 +291,20 @@ WINDSURF_CLI="$(find_windsurf "" "$USER_HOME")"
 [ -n "$WINDSURF_CLI" ] && ensure_extension "$WINDSURF_CLI" "$USER_HOME/.windsurf/extensions" "Windsurf"
 
 [ -n "$KIRO_CLI" ] && {
-  ensure_content "$USER_HOME/.kiro/steering/appsec-rules.md" "Kiro steering" << 'EOF'
+  mkdir -p "$USER_HOME/.kiro/steering"
+  cat > "$USER_HOME/.kiro/steering/appsec-rules.md" << 'EOF'
 ---
 inclusion: auto
-priority: maximum
-enforcement: mandatory
+description: "Regras de segurança corporativas que proíbem práticas inseguras na geração de código por IA."
 ---
 # APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
+
+This assistant MUST always generate secure-by-default code.
 FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
 disabled TLS, tokens in localStorage, MD5/SHA1 for passwords, stack traces to client.
 Always use environment variables or a secret manager for credentials.
 EOF
+  log "[OK] Kiro steering ensured"
 
   ensure_content "$USER_HOME/.kiro/hooks/appsec-gate.kiro.hook" "Kiro hook" << 'EOF'
 {

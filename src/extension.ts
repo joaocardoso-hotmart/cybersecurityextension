@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { execSync } from 'child_process';
 import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
-import { ensureOpenGrep } from './semgrep';
+import { ensureOpenGrep, runOpenGrep } from './semgrep';
 
 const CLAUDE_FILES = {
 	rules: ['appsec-rules.md'],
@@ -77,6 +78,13 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 	context.subscriptions.push(dismissCmd);
 
+	// Command to mark a finding as fixed
+	const markFixedCmd = vscode.commands.registerCommand(
+		'cybersecurityextension.markFindingFixed',
+		(...args: unknown[]) => markFindingFixed(args[0], sidebarProvider)
+	);
+	context.subscriptions.push(markFixedCmd);
+
 	// Register hover provider for security findings
 	context.subscriptions.push(
 		vscode.languages.registerHoverProvider('*', new SecurityHoverProvider())
@@ -89,6 +97,9 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
+	// Watch for file saves — re-scan to auto-remove fixed findings
+	registerFileSaveWatcher(context, sidebarProvider);
+
 	// Watch for git operations (commit / staging)
 	registerGitWatcher(context, sidebarProvider);
 
@@ -98,6 +109,9 @@ export function activate(context: vscode.ExtensionContext) {
 	// Detect install/update of the extension to force hook re-installation
 	const installState = detectInstallOrUpdate(context);
 	const force = installState !== 'none';
+
+	// Fix global steering file if it exists but is missing description (legacy MDM installs)
+	ensureGlobalSteeringFile(context);
 
 	// Auto-apply steering files on workspace open
 	autoApplyIfNeeded(context, force).catch(err => {
@@ -156,6 +170,79 @@ function detectInstallOrUpdate(context: vscode.ExtensionContext): 'install' | 'u
 	}
 
 	return 'none';
+}
+
+/**
+ * Ensures the global (user-level) Kiro steering file at ~/.kiro/steering/appsec-rules.md
+ * has the required front-matter with `description`. Legacy MDM installs may have written
+ * this file without the field, causing Kiro to show a "Progressive steering file missing
+ * description" warning.
+ *
+ * Only runs when the IDE is Kiro. Overwrites only if the file exists but lacks `description`.
+ */
+function ensureGlobalSteeringFile(context: vscode.ExtensionContext): void {
+	if (detectIDE() !== 'kiro') { return; }
+
+	const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+	if (!homeDir) { return; }
+
+	const globalSteering = path.join(homeDir, '.kiro', 'steering', 'appsec-rules.md');
+
+	if (!fs.existsSync(globalSteering)) { return; }
+
+	try {
+		const content = fs.readFileSync(globalSteering, 'utf-8');
+
+		// Check if it has a front-matter block with description
+		const frontMatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
+		if (!frontMatterMatch) {
+			// No front-matter at all — rewrite with proper content
+			writeGlobalSteering(globalSteering, context);
+			return;
+		}
+
+		const frontMatter = frontMatterMatch[1];
+		if (!frontMatter.includes('description:')) {
+			// Has front-matter but missing description — rewrite
+			writeGlobalSteering(globalSteering, context);
+			return;
+		}
+
+		// description exists — check it's not empty
+		const descMatch = frontMatter.match(/description:\s*["']?(.*)["']?/);
+		if (descMatch && descMatch[1].trim().length === 0) {
+			writeGlobalSteering(globalSteering, context);
+		}
+	} catch (err) {
+		console.error('[Hotmart AppSec] ensureGlobalSteeringFile error:', err);
+	}
+}
+
+function writeGlobalSteering(filePath: string, context: vscode.ExtensionContext): void {
+	// Use the bundled source file if available, otherwise write inline
+	const sourceFile = path.join(context.extensionPath, 'standards', 'kiro', 'steering', 'appsec-rules.md');
+
+	if (fs.existsSync(sourceFile)) {
+		const sourceContent = fs.readFileSync(sourceFile, 'utf-8');
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, sourceContent, 'utf-8');
+	} else {
+		// Inline fallback
+		const content = `---
+inclusion: auto
+description: "Regras de segurança corporativas que proíbem práticas inseguras na geração de código por IA."
+---
+# APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
+
+This assistant MUST always generate secure-by-default code.
+FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
+disabled TLS, tokens in localStorage, MD5/SHA1 for passwords, stack traces to client.
+Always use environment variables or a secret manager for credentials.
+`;
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, content, 'utf-8');
+	}
+	console.log(`[Hotmart AppSec] Global steering file fixed: ${filePath}`);
 }
 
 function ensureSecurityHookAllWorkspaces(context: vscode.ExtensionContext, force: boolean): void {
@@ -678,20 +765,19 @@ function buildFixPrompt(finding: {
 	suggestedFix: string | null;
 	snippet: string;
 }): string {
-	let prompt = `🛡️ **Correção de Segurança — ${finding.cwe}**\n\n`;
-	prompt += `**Vulnerabilidade encontrada:** ${finding.title}\n`;
-	prompt += `**Arquivo:** ${finding.file}, linha ${finding.line}\n`;
-	prompt += `**Código vulnerável:**\n\`\`\`\n${finding.snippet}\n\`\`\`\n\n`;
-	prompt += `**Problema:** ${finding.description}\n\n`;
-	prompt += `**Como corrigir:** ${finding.suggestion}\n\n`;
+	let prompt = `Corrija APENAS a vulnerabilidade ${finding.cwe} (${finding.title}) no arquivo \`${finding.file}\` linha ${finding.line}.\n\n`;
+	prompt += `Código vulnerável:\n\`\`\`\n${finding.snippet}\n\`\`\`\n\n`;
+	prompt += `Correção: ${finding.suggestion}\n`;
 
 	if (finding.suggestedFix) {
-		prompt += `**Correção sugerida:**\n\`\`\`\n${finding.suggestedFix}\n\`\`\`\n\n`;
+		prompt += `\nExemplo de fix:\n\`\`\`\n${finding.suggestedFix}\n\`\`\`\n`;
 	}
 
-	prompt += `Por favor, aplique essa correção no arquivo \`${finding.file}\` na linha ${finding.line}. `;
-	prompt += `Explique brevemente por que essa mudança é necessária do ponto de vista de segurança `;
-	prompt += `e garanta que a correção não quebre a funcionalidade existente.`;
+	prompt += `\nRegras:\n`;
+	prompt += `- Altere SOMENTE a linha/trecho vulnerável. Não reescreva o resto do código.\n`;
+	prompt += `- Mantenha a lógica e estrutura existentes intactas.\n`;
+	prompt += `- Não adicione comentários, logs ou código extra desnecessário.\n`;
+	prompt += `- A correção deve ser mínima e cirúrgica.`;
 
 	return prompt;
 }
@@ -717,6 +803,22 @@ async function dismissFinding(findingArg: unknown, sidebarProvider: SecuritySide
 		}
 	}
 
+	// Sync: merge currentFindings with sidebar's findings to ensure we have the full picture.
+	// The sidebar may have findings from manual scan that currentFindings doesn't have, and vice versa.
+	if (currentFindings.length === 0 && sidebarProvider.findings.length > 0) {
+		currentFindings = [...sidebarProvider.findings];
+	} else if (sidebarProvider.findings.length > 0) {
+		// Merge sidebar findings into currentFindings (deduplicate by id+file+line)
+		const seen = new Set(currentFindings.map(f => `${f.id}:${f.file}:${f.line}`));
+		for (const f of sidebarProvider.findings) {
+			const key = `${f.id}:${f.file}:${f.line}`;
+			if (!seen.has(key)) {
+				currentFindings.push(f);
+				seen.add(key);
+			}
+		}
+	}
+
 	// Remove from current findings
 	currentFindings = currentFindings.filter(f =>
 		!(f.id === findingInfo.id && f.file === findingInfo.file && f.line === findingInfo.line)
@@ -730,6 +832,53 @@ async function dismissFinding(findingArg: unknown, sidebarProvider: SecuritySide
 	sidebarProvider.updateFindings(currentFindings);
 
 	vscode.window.showInformationMessage(`🛡️ Finding ignorado como falso positivo.`);
+}
+
+// ─── MARK FINDING AS FIXED ────────────────────────────────────────────────────
+
+async function markFindingFixed(findingArg: unknown, sidebarProvider: SecuritySidebarProvider): Promise<void> {
+	let findingInfo: { id: string; file: string; line: number };
+
+	try {
+		if (typeof findingArg === 'string') {
+			findingInfo = JSON.parse(findingArg);
+		} else if (typeof findingArg === 'object' && findingArg !== null) {
+			findingInfo = findingArg as typeof findingInfo;
+		} else {
+			throw new Error('Invalid');
+		}
+	} catch {
+		try {
+			findingInfo = JSON.parse(decodeURIComponent(String(findingArg)));
+		} catch {
+			return;
+		}
+	}
+
+	// Sync findings sources
+	if (currentFindings.length === 0 && sidebarProvider.findings.length > 0) {
+		currentFindings = [...sidebarProvider.findings];
+	} else if (sidebarProvider.findings.length > 0) {
+		const seen = new Set(currentFindings.map(f => `${f.id}:${f.file}:${f.line}`));
+		for (const f of sidebarProvider.findings) {
+			const key = `${f.id}:${f.file}:${f.line}`;
+			if (!seen.has(key)) {
+				currentFindings.push(f);
+				seen.add(key);
+			}
+		}
+	}
+
+	// Remove from current findings
+	currentFindings = currentFindings.filter(f =>
+		!(f.id === findingInfo.id && f.file === findingInfo.file && f.line === findingInfo.line)
+	);
+
+	// Update diagnostics and sidebar
+	updateDiagnostics(currentFindings);
+	sidebarProvider.updateFindings(currentFindings);
+
+	vscode.window.showInformationMessage(`✅ Vulnerabilidade corrigida.`);
 }
 
 /**
@@ -771,6 +920,51 @@ function persistDismissal(findingInfo: { id: string; file: string; line: number 
 	}
 }
 
+// ─── FILE SAVE WATCHER (auto-remove fixed findings) ──────────────────────────
+
+function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
+	let rescanTimer: NodeJS.Timeout | undefined;
+
+	const listener = vscode.workspace.onDidSaveTextDocument((document) => {
+		const filePath = vscode.workspace.asRelativePath(document.uri);
+
+		// Only re-scan if we have active findings for this file
+		const hasFindings = currentFindings.some(f => f.file === filePath);
+		if (!hasFindings) {
+			return;
+		}
+
+		// Debounce to avoid hammering the scanner on rapid saves
+		if (rescanTimer) {
+			clearTimeout(rescanTimer);
+		}
+
+		rescanTimer = setTimeout(async () => {
+			try {
+				const workspaceFolders = vscode.workspace.workspaceFolders;
+				if (!workspaceFolders) { return; }
+
+				const workspaceFolder = workspaceFolders[0].uri.fsPath;
+
+				// Re-scan only the saved file
+				const freshFindings = await runOpenGrep([filePath], workspaceFolder, context.extensionPath);
+
+				// Remove old findings for this file and replace with fresh ones
+				const otherFindings = currentFindings.filter(f => f.file !== filePath);
+				currentFindings = [...otherFindings, ...freshFindings];
+
+				// Update diagnostics and sidebar
+				updateDiagnostics(currentFindings);
+				sidebarProvider.updateFindings(currentFindings);
+			} catch (err) {
+				console.error('[Hotmart AppSec] File save re-scan error:', err);
+			}
+		}, 500);
+	});
+
+	context.subscriptions.push(listener);
+}
+
 // ─── GIT WATCHER (triggers scan on commit/stage) ─────────────────────────────
 
 function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
@@ -784,6 +978,12 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 		return;
 	}
 
+	// Capture the initial staged files snapshot so we can detect real staging changes
+	let lastStagedSnapshot = '';
+	try {
+		lastStagedSnapshot = execSync('git diff --cached --name-only', { cwd: workspaceFolder, encoding: 'utf-8' });
+	} catch { /* */ }
+
 	// Capture the current index mtime at activation so we don't trigger on reload
 	let lastIndexMtime = 0;
 	try {
@@ -791,20 +991,50 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 		lastIndexMtime = stat.mtimeMs;
 	} catch { /* */ }
 
-	// Grace period: ignore all events in the first 5 seconds after activation
+	// Grace period: ignore all events in the first 2 seconds after activation
 	// to avoid triggering on reload/startup
 	let ready = false;
-	const readyTimer = setTimeout(() => { ready = true; }, 5000);
+	const readyTimer = setTimeout(() => { ready = true; }, 2000);
 
 	let debounceTimer: NodeJS.Timeout | undefined;
+	let scanPending = false;
 
 	const triggerScan = () => {
+		scanPending = true;
 		if (debounceTimer) {
 			clearTimeout(debounceTimer);
 		}
 		debounceTimer = setTimeout(() => {
+			if (!scanPending) { return; }
+			scanPending = false;
+
+			// Check current state of the working tree
+			let currentStaged = '';
+			try {
+				currentStaged = execSync('git diff --cached --name-only', { cwd: workspaceFolder, encoding: 'utf-8' });
+			} catch { /* */ }
+
+			let currentUnstaged = '';
+			try {
+				currentUnstaged = execSync('git diff --name-only --diff-filter=d', { cwd: workspaceFolder, encoding: 'utf-8' });
+			} catch { /* */ }
+
+			// If there's absolutely nothing to scan (clean tree), skip
+			if (currentStaged === '' && currentUnstaged === '') {
+				lastStagedSnapshot = '';
+				return;
+			}
+
+			// If the staged snapshot is identical AND no unstaged changes exist,
+			// this is likely an IDE internal refresh — skip
+			if (currentStaged === lastStagedSnapshot && currentUnstaged === '') {
+				return;
+			}
+
+			// Something changed — run the scan
+			lastStagedSnapshot = currentStaged;
 			onGitOperation(sidebarProvider);
-		}, 1200);
+		}, 800);
 	};
 
 	const watcher = fs.watch(gitDir, (eventType, filename) => {
@@ -813,15 +1043,12 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 
 		// Trigger on:
 		//   - index            → git add / git reset (staging changes)
-		//   - index.lock        → git is mid-write of the index (covers fast `git add`)
 		//   - COMMIT_EDITMSG    → git commit
-		if (filename !== 'index' && filename !== 'index.lock' && filename !== 'COMMIT_EDITMSG') {
+		if (filename !== 'index' && filename !== 'COMMIT_EDITMSG') {
 			return;
 		}
 
-		// For index changes, confirm the index was actually rewritten by comparing the
-		// modification time (always advances on a real write — unlike the byte size, which
-		// frequently stays identical when re-staging the same file).
+		// For index changes, confirm the index was actually rewritten by comparing mtime
 		if (filename === 'index') {
 			try {
 				const stat = fs.statSync(path.join(gitDir, 'index'));

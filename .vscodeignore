@@ -1,26 +1,35 @@
-.vscode/**
-.vscode-test/**
+# Source code (not needed — compiled output is in out/)
 src/**
-.gitignore
-.github/**
 tsconfig.json
 eslint.config.mjs
-**/*.map
-**/*.ts
+
+# Development tools
 node_modules/**
-!standards/**
-.kiro/**
-.cursor/**
-.claude/**
-.amazonq/**
-CLAUDE.md
-teste.js
-.appsec-state/**
-lelele.js
-TestePy.py
-PyhtonTeste.py
-**/testepy.py
-Apresentacao.py
-*.vsix
-.tmp-rule-tests/**
+.vscode/**
+.vscode-test/**
+
+# MDM deploy scripts (not part of the extension)
+deploy/**
+dist/**
 scripts/**
+
+# Spec documentation (not needed in runtime)
+.kiro/**
+.claude/**
+.cursor/**
+.appsec-state/**
+
+# Git and CI
+.git/**
+.github/**
+.gitignore
+
+# Source maps (not needed in production)
+out/**/*.map
+
+# Build artifacts
+*.vsix
+
+# OS files
+.DS_Store
+Thumbs.db

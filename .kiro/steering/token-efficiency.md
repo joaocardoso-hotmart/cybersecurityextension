@@ -1,5 +1,6 @@
 ---
 inclusion: auto
+description: "Política de eficiência de tokens para reduzir consumo sem comprometer qualidade ou segurança."
 ---
 # Token-Efficient Coding Policy
 

@@ -120,29 +120,67 @@ install_extension() {
   local ca_certs
   ca_certs="$(get_trusted_ca_certs)"
 
-  # Se rodando como root e temos um console user, executa como ele COM home correto
+  # Montar env_cmd para execução como console user
+  local env_cmd="env HOME=$real_home"
+  [ -n "$ca_certs" ] && env_cmd="$env_cmd NODE_EXTRA_CA_CERTS=$ca_certs"
+
+  # Determinar método de instalação:
+  # 1. Bundled .vsix (funciona offline, sem TLS — ideal para Kiro + Zscaler)
+  # 2. Marketplace (requer internet + TLS — funciona para VS Code/Cursor sem proxy)
+  local vsix_path="/Library/Application Support/Hotmart/appsec/extension.vsix"
+  local install_source="$EXTENSION_ID"
+  local install_method="marketplace"
+
+  if [ -f "$vsix_path" ]; then
+    install_source="$vsix_path"
+    install_method="vsix"
+  fi
+
+  log "  [DEBUG] Method=$install_method, Running as $real_user (HOME=$real_home): $cli --install-extension"
+
+  # Executar instalação
   if [ "$(id -u)" = "0" ] && [ -n "$real_user" ] && [ "$real_user" != "root" ] && [ -n "$real_home" ]; then
-    log "  [DEBUG] Running as $real_user (HOME=$real_home): $cli --install-extension $EXTENSION_ID"
+    # Rodando como root — executar como console user
+    local already_installed=""
+    already_installed="$(sudo -H -u "$real_user" $env_cmd "$cli" --list-extensions 2>/dev/null | grep -i "HotmartCybersecurity" || true)"
 
-    # Montar comando com env vars via env(1) para evitar problemas com sudo
-    local env_cmd="env HOME=$real_home"
-    [ -n "$ca_certs" ] && env_cmd="$env_cmd NODE_EXTRA_CA_CERTS=$ca_certs"
-
-    if sudo -H -u "$real_user" $env_cmd "$cli" --list-extensions 2>/dev/null | grep -qi "HotmartCybersecurity"; then
-      sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$EXTENSION_ID" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
-        && ok "$label (updated)" || { log "  [ERROR] $label install failed — see appsec-install-detail.log"; fail "$label"; }
+    if [ -n "$already_installed" ]; then
+      sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$install_source" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+        && ok "$label (updated via $install_method)" \
+        || {
+          # Se marketplace falhou, tenta .vsix como fallback
+          if [ "$install_method" = "marketplace" ] && [ -f "$vsix_path" ]; then
+            log "  [WARN] Marketplace failed, trying bundled .vsix..."
+            sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$vsix_path" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+              && ok "$label (updated via vsix fallback)" \
+              || { log "  [ERROR] $label install failed"; fail "$label"; }
+          else
+            log "  [ERROR] $label install failed — see appsec-install-detail.log"; fail "$label"
+          fi
+        }
     else
-      sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$EXTENSION_ID" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
-        && ok "$label (installed)" || { log "  [ERROR] $label install failed — see appsec-install-detail.log"; fail "$label"; }
+      sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$install_source" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+        && ok "$label (installed via $install_method)" \
+        || {
+          # Se marketplace falhou, tenta .vsix como fallback
+          if [ "$install_method" = "marketplace" ] && [ -f "$vsix_path" ]; then
+            log "  [WARN] Marketplace failed, trying bundled .vsix..."
+            sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$vsix_path" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+              && ok "$label (installed via vsix fallback)" \
+              || { log "  [ERROR] $label install failed"; fail "$label"; }
+          else
+            log "  [ERROR] $label install failed — see appsec-install-detail.log"; fail "$label"
+          fi
+        }
     fi
   else
     # Rodando como user normal
     [ -n "$ca_certs" ] && export NODE_EXTRA_CA_CERTS="$ca_certs"
     if "$cli" --list-extensions 2>/dev/null | grep -qi "HotmartCybersecurity"; then
-      "$cli" --install-extension "$EXTENSION_ID" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+      "$cli" --install-extension "$install_source" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
         && ok "$label (updated)" || { log "  [ERROR] $label update failed"; fail "$label"; }
     else
-      "$cli" --install-extension "$EXTENSION_ID" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+      "$cli" --install-extension "$install_source" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
         && ok "$label (installed)" || { log "  [ERROR] $label install failed"; fail "$label"; }
     fi
   fi
@@ -234,7 +272,7 @@ STATE_DIR=".appsec-state"
 DISMISSED_FILE="$STATE_DIR/dismissed.json"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
+STAGED_FILES=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
 [ -z "$STAGED_FILES" ] && exit 0
 if [ ! -f "$RULES_FILE" ]; then
   GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
@@ -290,63 +328,162 @@ HOOK
 }
 
 # ---------------------------------------------------------------------------
-# IDE detection — uses USER_HOME (resolved from console user) and mdfind
+# IDE detection — strong validation, no PATH lookup
 # ---------------------------------------------------------------------------
+# Rules:
+#   1. Only look inside .app bundles in /Applications or ~/Applications
+#      OR via Spotlight by known bundle ID
+#   2. NEVER use PATH lookup for Electron IDEs — the developer's current
+#      session has "cursor", "code", etc. in PATH already, which causes
+#      false positives when running from inside those IDEs.
+#   3. Validate the binary responds to --version with a semver number.
+# ---------------------------------------------------------------------------
+
+# Returns 0 if the binary is a real Electron IDE CLI (not kiro-cli etc.)
+validate_ide_cli() {
+  local cli="$1"
+  [ -x "$cli" ] || return 1
+
+  # If the binary is inside a .app/Contents/Resources/app/bin/ structure,
+  # that's already proof it's an Electron IDE — skip --version check
+  # (which can fail due to TLS/proxy issues on Kiro)
+  if echo "$cli" | grep -q "Contents/Resources/app/bin"; then
+    return 0
+  fi
+
+  # For binaries not in .app bundle, verify via --version
+  local real_user ver
+  real_user="$(stat -f '%Su' /dev/console 2>/dev/null || echo "")"
+  if [ -n "$real_user" ] && [ "$real_user" != "root" ]; then
+    local real_home
+    real_home="$(dscl . -read "/Users/$real_user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+    ver="$(sudo -H -u "$real_user" HOME="$real_home" "$cli" --version 2>/dev/null | head -1)"
+  else
+    ver="$("$cli" --version 2>/dev/null | head -1)"
+  fi
+  echo "$ver" | grep -qE '^[0-9]+\.[0-9]+' || return 1
+  return 0
+}
+
 detect_kiro() {
+  # Kiro IDE — some versions use "kiro" as CLI, others use "code" (VS Code fork)
+  # Try both, prefer "kiro" if it exists
   local paths=(
     "/Applications/Kiro.app/Contents/Resources/app/bin/kiro"
+    "/Applications/Kiro.app/Contents/Resources/app/bin/code"
     "$USER_HOME/Applications/Kiro.app/Contents/Resources/app/bin/kiro"
+    "$USER_HOME/Applications/Kiro.app/Contents/Resources/app/bin/code"
   )
-  for c in "${paths[@]}"; do [ -x "$c" ] && echo "$c" && return; done
-  # Spotlight fallback
-  local app; app="$(mdfind "kMDItemCFBundleIdentifier == 'com.amazon.kiro'" 2>/dev/null | head -1)"
-  [ -n "$app" ] && [ -x "$app/Contents/Resources/app/bin/kiro" ] && echo "$app/Contents/Resources/app/bin/kiro" && return
-  command -v kiro 2>/dev/null || echo ""
+  for c in "${paths[@]}"; do
+    [ -x "$c" ] && echo "$c" && return
+  done
+  # Spotlight by known bundle IDs
+  local app
+  for bid in "com.amazon.kiro" "software.amazon.kiro" "com.amazon.codewhisperer"; do
+    app="$(mdfind "kMDItemCFBundleIdentifier == '$bid'" 2>/dev/null | head -1)"
+    if [ -n "$app" ] && [ -d "$app" ]; then
+      # Try kiro first, then code
+      [ -x "$app/Contents/Resources/app/bin/kiro" ] && echo "$app/Contents/Resources/app/bin/kiro" && return
+      [ -x "$app/Contents/Resources/app/bin/code" ] && echo "$app/Contents/Resources/app/bin/code" && return
+    fi
+  done
+  # Fallback: any Kiro*.app in /Applications (excluding "Kiro CLI")
+  local kiro_app
+  kiro_app="$(find /Applications -maxdepth 1 -name "Kiro*.app" -not -name "*CLI*" -type d 2>/dev/null | head -1)"
+  if [ -n "$kiro_app" ]; then
+    [ -x "$kiro_app/Contents/Resources/app/bin/kiro" ] && echo "$kiro_app/Contents/Resources/app/bin/kiro" && return
+    [ -x "$kiro_app/Contents/Resources/app/bin/code" ] && echo "$kiro_app/Contents/Resources/app/bin/code" && return
+  fi
+  echo ""
 }
+
 detect_vscode() {
   local paths=(
     "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
     "$USER_HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
     "$USER_HOME/Downloads/Visual Studio Code.app/Contents/Resources/app/bin/code"
   )
-  for c in "${paths[@]}"; do [ -x "$c" ] && echo "$c" && return; done
-  # Spotlight fallback
-  local app; app="$(mdfind "kMDItemCFBundleIdentifier == 'com.microsoft.VSCode'" 2>/dev/null | head -1)"
-  [ -n "$app" ] && [ -x "$app/Contents/Resources/app/bin/code" ] && echo "$app/Contents/Resources/app/bin/code" && return
-  command -v code 2>/dev/null || echo ""
+  for c in "${paths[@]}"; do
+    [ -x "$c" ] && validate_ide_cli "$c" && echo "$c" && return
+  done
+  local app
+  for bid in "com.microsoft.VSCode" "com.microsoft.VSCodeInsiders"; do
+    app="$(mdfind "kMDItemCFBundleIdentifier == '$bid'" 2>/dev/null | head -1)"
+    if [ -n "$app" ] && [ -d "$app" ]; then
+      local bin; bin="$(find "$app/Contents/Resources/app/bin" -maxdepth 1 -type f -name "code" -perm +111 2>/dev/null | head -1)"
+      [ -n "$bin" ] && validate_ide_cli "$bin" && echo "$bin" && return
+    fi
+  done
+  echo ""
 }
+
 detect_cursor() {
   local paths=(
     "/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
     "$USER_HOME/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
   )
-  for c in "${paths[@]}"; do [ -x "$c" ] && echo "$c" && return; done
-  # Spotlight fallback
-  local app; app="$(mdfind "kMDItemCFBundleIdentifier == 'com.todesktop.230313mzl4w4u92'" 2>/dev/null | head -1)"
-  [ -n "$app" ] && [ -x "$app/Contents/Resources/app/bin/cursor" ] && echo "$app/Contents/Resources/app/bin/cursor" && return
-  command -v cursor 2>/dev/null || echo ""
+  for c in "${paths[@]}"; do
+    [ -x "$c" ] && validate_ide_cli "$c" && echo "$c" && return
+  done
+  local app
+  for bid in "com.todesktop.230313mzl4w4u92" "com.getcursor.cursor"; do
+    app="$(mdfind "kMDItemCFBundleIdentifier == '$bid'" 2>/dev/null | head -1)"
+    if [ -n "$app" ] && [ -d "$app" ]; then
+      local bin; bin="$(find "$app/Contents/Resources/app/bin" -maxdepth 1 -type f -name "cursor" -perm +111 2>/dev/null | head -1)"
+      [ -n "$bin" ] && validate_ide_cli "$bin" && echo "$bin" && return
+    fi
+  done
+  echo ""
 }
+
 detect_windsurf() {
   local paths=(
     "/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf"
     "$USER_HOME/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf"
   )
-  for c in "${paths[@]}"; do [ -x "$c" ] && echo "$c" && return; done
-  # Spotlight fallback
-  local app; app="$(mdfind "kMDItemCFBundleIdentifier == 'com.exafunction.windsurf'" 2>/dev/null | head -1)"
-  [ -n "$app" ] && [ -x "$app/Contents/Resources/app/bin/windsurf" ] && echo "$app/Contents/Resources/app/bin/windsurf" && return
-  command -v windsurf 2>/dev/null || echo ""
-}
-detect_claude() {
-  for c in "/usr/local/bin/claude" "$USER_HOME/.claude/bin/claude"; do
-    [ -x "$c" ] && echo "$c" && return
+  for c in "${paths[@]}"; do
+    [ -x "$c" ] && validate_ide_cli "$c" && echo "$c" && return
   done
-  command -v claude 2>/dev/null || echo ""
+  local app
+  for bid in "com.exafunction.windsurf" "com.codeium.windsurf"; do
+    app="$(mdfind "kMDItemCFBundleIdentifier == '$bid'" 2>/dev/null | head -1)"
+    if [ -n "$app" ] && [ -d "$app" ]; then
+      local bin; bin="$(find "$app/Contents/Resources/app/bin" -maxdepth 1 -type f -name "windsurf" -perm +111 2>/dev/null | head -1)"
+      [ -n "$bin" ] && validate_ide_cli "$bin" && echo "$bin" && return
+    fi
+  done
+  echo ""
+}
+
+detect_claude() {
+  # Claude Code CLI — only known install paths, never PATH
+  # (PATH may contain Kiro's embedded claude or other tools)
+  local paths=(
+    "/usr/local/bin/claude"
+    "$USER_HOME/.claude/bin/claude"
+    "$USER_HOME/.local/bin/claude"
+  )
+  for c in "${paths[@]}"; do
+    if [ -x "$c" ]; then
+      local ver; ver="$("$c" --version 2>/dev/null | head -1)"
+      echo "$ver" | grep -qE '[0-9]+\.[0-9]+' && echo "$c" && return
+    fi
+  done
+  local app
+  for bid in "com.anthropic.claude" "com.anthropic.claudecode"; do
+    app="$(mdfind "kMDItemCFBundleIdentifier == '$bid'" 2>/dev/null | head -1)"
+    if [ -n "$app" ] && [ -d "$app" ]; then
+      local bin; bin="$(find "$app" -maxdepth 5 -type f -name "claude" -perm +111 2>/dev/null | head -1)"
+      [ -n "$bin" ] && echo "$bin" && return
+    fi
+  done
+  echo ""
 }
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 main() {
   echo ""
   echo -e "${B}${Y}╔══════════════════════════════════════════════════════════════╗${N}"
@@ -378,17 +515,20 @@ main() {
     section "Kiro ($KIRO_CLI)"
     install_extension "$KIRO_CLI" "Kiro extension"
 
-    write_file "$USER_HOME/.kiro/steering/appsec-rules.md" "Kiro steering" << 'EOF'
+    mkdir -p "$USER_HOME/.kiro/steering"
+    cat > "$USER_HOME/.kiro/steering/appsec-rules.md" << 'EOF'
 ---
 inclusion: auto
-priority: maximum
-enforcement: mandatory
+description: "Regras de segurança corporativas que proíbem práticas inseguras na geração de código por IA."
 ---
 # APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
+
 This assistant MUST always generate secure-by-default code.
 FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
 disabled TLS, tokens in localStorage, MD5/SHA1 for passwords, stack traces to client.
+Always use environment variables or a secret manager for credentials.
 EOF
+    ok "Kiro steering"
 
     write_file "$USER_HOME/.kiro/hooks/appsec-gate.kiro.hook" "Kiro hook" << 'EOF'
 {
