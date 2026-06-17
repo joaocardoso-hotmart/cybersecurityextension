@@ -6,6 +6,14 @@ import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
 import { ensureOpenGrep, runOpenGrep } from './semgrep';
 
+/**
+ * Quick check for paths that should never be scanned on save.
+ */
+function isExcludedFilePath(filePath: string): boolean {
+	return /^(\.kiro|\.cursor|\.claude|\.vscode|\.github|node_modules|out|dist|build)\//i.test(filePath)
+		|| /\.(lock|min\.js|bundle\.js)$/.test(filePath);
+}
+
 const CLAUDE_FILES = {
 	rules: ['appsec-rules.md'],
 };
@@ -928,9 +936,10 @@ function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvid
 	const listener = vscode.workspace.onDidSaveTextDocument((document) => {
 		const filePath = vscode.workspace.asRelativePath(document.uri);
 
-		// Only re-scan if we have active findings for this file
-		const hasFindings = currentFindings.some(f => f.file === filePath);
-		if (!hasFindings) {
+		// Always re-scan changed files on save so NEW vulnerabilities are detected
+		// even when there are no current findings (e.g. after fixing and reintroducing)
+		// Only skip files that are in excluded paths
+		if (isExcludedFilePath(filePath)) {
 			return;
 		}
 
@@ -952,6 +961,10 @@ function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvid
 				// Remove old findings for this file and replace with fresh ones
 				const otherFindings = currentFindings.filter(f => f.file !== filePath);
 				currentFindings = [...otherFindings, ...freshFindings];
+
+				// If findings changed (fixed or new ones appeared), reset the notification
+				// fingerprint so the git watcher will show a fresh notification on next stage
+				lastNotificationFingerprint = '';
 
 				// Update diagnostics and sidebar
 				updateDiagnostics(currentFindings);
@@ -1025,13 +1038,8 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 				return;
 			}
 
-			// If the staged snapshot is identical AND no unstaged changes exist,
-			// this is likely an IDE internal refresh — skip
-			if (currentStaged === lastStagedSnapshot && currentUnstaged === '') {
-				return;
-			}
-
-			// Something changed — run the scan
+			// Always run the scan when the index changes — even if the staged file list
+			// is the same, the file CONTENT may have changed (fix → reintroduce pattern).
 			lastStagedSnapshot = currentStaged;
 			onGitOperation(sidebarProvider);
 		}, 800);

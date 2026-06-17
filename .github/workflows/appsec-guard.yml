@@ -119,7 +119,7 @@ jobs:
             echo "     • Provide business justification"
             echo "     • Wait for explicit approval before modifying"
             echo ""
-            echo "  📧 Contact: cybersecurity@hotmart.com"
+            echo "  📧 Contact: appsec@yourcompany.com"
             echo ""
             echo "╔══════════════════════════════════════════════════════════════╗"
             echo "║  ❌  THIS PR CANNOT BE MERGED — SECURITY VIOLATION         ║"
