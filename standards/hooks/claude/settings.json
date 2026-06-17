@@ -3,7 +3,12 @@
     "PreToolUse": [
       {
         "matcher": "Write|Edit|MultiEdit|CreateFile",
-        "hooks": [{ "type": "command", "command": "bash .appsec/appsec-gate.sh" }]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .appsec/appsec-gate.sh"
+          }
+        ]
       }
     ]
   }

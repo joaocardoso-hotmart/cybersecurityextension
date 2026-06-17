@@ -3,8 +3,11 @@
 STATE_DIR=".appsec-state"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"
+
+# Only scan code files (not markdown, yaml, etc.)
 STAGED=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
 [ -z "$STAGED" ] && exit 0
+
 if [ ! -f "$RULES_FILE" ]; then
   GIT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
   [ -f "$GIT_ROOT/rules/security.yml" ] && RULES_FILE="$GIT_ROOT/rules/security.yml" || exit 0

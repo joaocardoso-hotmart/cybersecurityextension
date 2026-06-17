@@ -227,12 +227,12 @@ function writeGlobalSteering(filePath: string, context: vscode.ExtensionContext)
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, sourceContent, 'utf-8');
 	} else {
-		// Inline fallback
+		// Inline fallback — minimal version that still passes integrity checks
 		const content = `---
 inclusion: auto
 description: "Regras de segurança corporativas que proíbem práticas inseguras na geração de código por IA."
 ---
-# APPSEC SECURITY STEERING — CORPORATE MANDATORY POLICY
+# SECURITY CRITICAL RULES — NON-BYPASSABLE POLICY
 
 This assistant MUST always generate secure-by-default code.
 FORBIDDEN: hardcoded credentials, SQL injection, eval() with user input,
@@ -1199,8 +1199,51 @@ async function autoApplyIfNeeded(context: vscode.ExtensionContext, force: boolea
 	for (const folder of folders) {
 		try {
 			await applyToAllTargets(context, folder.uri.fsPath, true, force);
+			ensureLinterIgnores(folder.uri.fsPath);
 		} catch (err) {
 			console.error('[Hotmart AppSec] autoApplyIfNeeded error:', err);
+		}
+	}
+}
+
+/**
+ * Ensures that protected AppSec files are excluded from common linters/formatters
+ * that may modify them (prettier, markdownlint, etc.).
+ * Only modifies ignore files that already exist in the workspace.
+ */
+function ensureLinterIgnores(workspaceFolder: string): void {
+	const APPSEC_PATHS = [
+		'.kiro/steering/',
+		'.kiro/specs/',
+		'.claude/rules/',
+		'.cursor/rules/',
+		'.github/copilot-instructions.md',
+		'.appsec/',
+		'.appsec-state/',
+	];
+
+	const APPSEC_MARKER = '# AppSec protected paths (do not format)';
+
+	const ignoreFiles = ['.prettierignore', '.markdownlintignore'];
+
+	for (const ignoreFile of ignoreFiles) {
+		const filePath = path.join(workspaceFolder, ignoreFile);
+
+		// Only modify if the ignore file already exists (don't create new ones)
+		if (!fs.existsSync(filePath)) { continue; }
+
+		try {
+			const content = fs.readFileSync(filePath, 'utf-8');
+
+			// Already has our entries
+			if (content.includes(APPSEC_MARKER)) { continue; }
+
+			// Append our protected paths
+			const block = `\n${APPSEC_MARKER}\n${APPSEC_PATHS.join('\n')}\n`;
+			fs.appendFileSync(filePath, block, 'utf-8');
+			console.log(`[Hotmart AppSec] Added protected paths to ${ignoreFile}`);
+		} catch (err) {
+			console.warn(`[Hotmart AppSec] Could not update ${ignoreFile}:`, err);
 		}
 	}
 }
