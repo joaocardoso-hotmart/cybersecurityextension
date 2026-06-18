@@ -1,5 +1,0 @@
-FROM node:18-alpine
-RUN apk add --no-cache curl
-USER appuser
-RUN npm install
-CMD ["node", "app.js"]

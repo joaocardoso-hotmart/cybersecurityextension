@@ -18,8 +18,6 @@ const CLAUDE_FILES = {
 	rules: ['appsec-rules.md'],
 };
 
-const GITHUB_WORKFLOW_FILES = ['appsec-guard.yml'];
-
 /**
  * Detects which IDE is running based on vscode.env.uriScheme.
  */
@@ -1124,50 +1122,7 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 let lastNotificationFingerprint = '';
 
 // Track whether we already prompted about outdated workflow in this session
-let workflowUpdatePrompted = false;
-
-/**
- * Checks if the GitHub Actions workflow in the workspace is outdated compared
- * to the version bundled with the extension. If so, prompts the user to update.
- */
-async function checkWorkflowFreshness(context: vscode.ExtensionContext): Promise<void> {
-	if (workflowUpdatePrompted) { return; }
-
-	const workspaceFolder = getWorkspaceFolder();
-	if (!workspaceFolder) { return; }
-
-	const workspaceWorkflow = path.join(workspaceFolder, '.github', 'workflows', 'appsec-guard.yml');
-	const bundledWorkflow = path.join(context.extensionPath, 'standards', 'github', 'workflows', 'appsec-guard.yml');
-
-	if (!fs.existsSync(workspaceWorkflow) || !fs.existsSync(bundledWorkflow)) { return; }
-
-	try {
-		const workspaceContent = fs.readFileSync(workspaceWorkflow, 'utf-8');
-		const bundledContent = fs.readFileSync(bundledWorkflow, 'utf-8');
-
-		if (workspaceContent === bundledContent) { return; }
-
-		workflowUpdatePrompted = true;
-
-		const action = await vscode.window.showWarningMessage(
-			'[Hotmart AppSec] 🛡️ Seu workflow de segurança (appsec-guard.yml) está desatualizado. Quer que a gente atualize pra versão mais recente?',
-			'Atualizar',
-			'Ignorar'
-		);
-
-		if (action === 'Atualizar') {
-			fs.writeFileSync(workspaceWorkflow, bundledContent, 'utf-8');
-			vscode.window.showInformationMessage('[Hotmart AppSec] ✅ Workflow atualizado! Inclua no próximo commit pra manter a pipeline em dia. 👍');
-		}
-	} catch (err) {
-		console.error('[Hotmart AppSec] checkWorkflowFreshness error:', err);
-	}
-}
-
 async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise<void> {
-	// Check if workflow is outdated before scanning
-	await checkWorkflowFreshness(_extensionContext);
-
 	const findings = await runSecurityScan(sidebarProvider);
 
 	if (findings.length === 0) {
@@ -1231,9 +1186,6 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 
 	// Install preToolUse hooks only for the detected IDE
 	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
-
-	// GitHub workflow is IDE-agnostic (CI/CD protection)
-	applied += await applyGitHubWorkflow(context, workspaceFolder);
 
 	if (applied > 0) {
 		vscode.window.showInformationMessage(
@@ -1347,15 +1299,15 @@ async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFold
 
 	// Apply IDE-specific rule files (copilot-instructions.md, appsec-rules.mdc, etc.)
 	applied += await applyIdeSpecificFiles(context, workspaceFolder, force || silent);
-
 	// Always apply Claude rules (Claude Code can be used alongside any IDE)
 	applied += await applyClaudeFiles(context, workspaceFolder, force || silent);
 
 	// Install security hooks only for the current IDE
 	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
 
-	// GitHub workflow is IDE-agnostic (CI/CD protection)
-	applied += await applyGitHubWorkflow(context, workspaceFolder, force || silent);
+	// GitHub workflow is NOT applied automatically to avoid breaking CI/CD tools
+	// (GitHub Apps like Magic Deploy lack `workflows` permission).
+	// Use the manual "Bootstrap Project" command to install it.
 
 	if (!silent && applied > 0) {
 		vscode.window.showInformationMessage(`[Hotmart AppSec] ✅ Padrões de segurança corporativa aplicados: ${applied} arquivo(s) para ${currentIde}. 🎯`);
@@ -1464,31 +1416,6 @@ async function installClaudeHook(context: vscode.ExtensionContext, workspaceFold
 	}
 	fs.copyFileSync(sourceFile, settingsFile);
 	return 1;
-}
-
-// ─── GITHUB WORKFLOW ──────────────────────────────────────────────────────────
-
-async function applyGitHubWorkflow(
-	context: vscode.ExtensionContext,
-	workspaceFolder: string,
-	overwrite: boolean = false
-): Promise<number> {
-	const targetDir = path.join(workspaceFolder, '.github', 'workflows');
-	const sourceDir = path.join(context.extensionPath, 'standards', 'github', 'workflows');
-
-	if (!fs.existsSync(targetDir)) {
-		fs.mkdirSync(targetDir, { recursive: true });
-	}
-
-	let count = 0;
-	for (const file of GITHUB_WORKFLOW_FILES) {
-		const source = path.join(sourceDir, file);
-		const dest = path.join(targetDir, file);
-		if (!fs.existsSync(source)) { continue; }
-		count += await copySingleFile(source, dest, file, overwrite);
-	}
-
-	return count;
 }
 
 /**

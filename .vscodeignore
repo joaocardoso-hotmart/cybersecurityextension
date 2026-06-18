@@ -19,6 +19,11 @@ scripts/**
 .cursor/**
 .appsec-state/**
 
+# Test files (not needed in production)
+Teste*.js
+test-*
+.appsec/**
+
 # Git and CI
 .git/**
 .github/**
