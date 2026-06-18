@@ -199,16 +199,27 @@ jobs:
           HAS_ISSUE="false"
           ISSUE_TYPE=""
 
-          # Check if hook file exists
+          # First check: does the hook file exist in the base branch?
+          EXISTED_IN_BASE="false"
+          if git show origin/${{ github.base_ref }}:"${HOOK_FILE}" &>/dev/null; then
+            EXISTED_IN_BASE="true"
+          fi
+
+          # Check if hook file exists in the PR branch
           if [ ! -f "$HOOK_FILE" ]; then
-            HAS_ISSUE="true"
-            ISSUE_TYPE="deleted"
-            echo "  ❌ Hook file not found: $HOOK_FILE"
+            if [ "$EXISTED_IN_BASE" = "true" ]; then
+              # File existed in base but was DELETED in this PR → violation
+              HAS_ISSUE="true"
+              ISSUE_TYPE="deleted"
+              echo "  ❌ Hook file was deleted: $HOOK_FILE"
+            else
+              # File never existed (repo not yet bootstrapped) → skip silently
+              echo "  ℹ️  Hook file not present yet (repo not bootstrapped) — skipping"
+            fi
           else
-            # Check if hook was modified in this PR
+            # Hook file exists in PR branch — check for modifications
             if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${HOOK_FILE}$"; then
-              # Differentiate between creation (first time) and modification
-              if git show origin/${{ github.base_ref }}:"${HOOK_FILE}" &>/dev/null; then
+              if [ "$EXISTED_IN_BASE" = "true" ]; then
                 # File exists in base branch → this is a MODIFICATION → block
                 HAS_ISSUE="true"
                 ISSUE_TYPE="modified"
@@ -223,7 +234,7 @@ jobs:
             fi
 
             # Check if hook is executable (only if file already existed in base branch)
-            if git show origin/${{ github.base_ref }}:"${HOOK_FILE}" &>/dev/null; then
+            if [ "$EXISTED_IN_BASE" = "true" ]; then
               if [ ! -x "$HOOK_FILE" ]; then
                 HAS_ISSUE="true"
                 ISSUE_TYPE="disabled"

@@ -1986,8 +1986,10 @@ rules:
       cwe: ["CWE-798"]
 
   - id: dockerfile-run-as-root
-    pattern-regex: (?im)^(RUN|CMD|ENTRYPOINT)\s+
-    message: "Dockerfile com instruções de execução: confirme que existe um USER não-root antes para reduzir privilégios."
+    patterns:
+      - pattern-regex: (?im)^(RUN|CMD|ENTRYPOINT)\s+
+      - pattern-not-regex: (?im)^USER\s+(?!root\b)\S+
+    message: "Dockerfile sem instrução USER não-root. Adicione 'USER <nonroot>' antes das instruções de execução para reduzir privilégios."
     languages: [generic]
     paths:
       include:

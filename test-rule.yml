@@ -1,0 +1,13 @@
+rules:
+  - id: dockerfile-run-as-root
+    patterns:
+      - pattern-regex: (?im)^(RUN|CMD|ENTRYPOINT)\s+
+      - pattern-not-regex: (?im)^USER\s+(?!root\b)\S+
+    message: "test"
+    languages: [generic]
+    paths:
+      include:
+        - "*Dockerfile*"
+    severity: INFO
+    metadata:
+      cwe: ["CWE-250"]
