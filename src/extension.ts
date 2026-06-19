@@ -6,11 +6,17 @@ import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
 import { ensureOpenGrep, runOpenGrep } from './semgrep';
 
+/**
+ * Quick check for paths that should never be scanned on save.
+ */
+function isExcludedFilePath(filePath: string): boolean {
+	return /^(\.kiro|\.cursor|\.claude|\.vscode|\.github|node_modules|out|dist|build)\//i.test(filePath)
+		|| /\.(lock|min\.js|bundle\.js)$/.test(filePath);
+}
+
 const CLAUDE_FILES = {
 	rules: ['appsec-rules.md'],
 };
-
-const GITHUB_WORKFLOW_FILES = ['appsec-guard.yml'];
 
 /**
  * Detects which IDE is running based on vscode.env.uriScheme.
@@ -26,9 +32,12 @@ function detectIDE(): string {
 // Diagnostics collection for security findings
 let diagnosticCollection: vscode.DiagnosticCollection;
 let currentFindings: SecurityFinding[] = [];
+let _extensionContext: vscode.ExtensionContext;
 
 export function activate(context: vscode.ExtensionContext) {
 	console.log('Hotmart Cybersecurity Extension activated');
+
+	_extensionContext = context;
 
 	// Set extension path for scanner to find rules
 	setExtensionPath(context.extensionPath);
@@ -127,11 +136,11 @@ export function activate(context: vscode.ExtensionContext) {
 	// Notify the user when the extension is freshly installed or updated
 	if (installState === 'install') {
 		vscode.window.showInformationMessage(
-			'🛡️ Hotmart Cybersecurity instalado. Hooks de segurança configurados nos workspaces abertos.'
+			'[Hotmart AppSec] 🛡️ Extensão instalada com sucesso! Os hooks de segurança corporativa foram configurados nos seus workspaces. Estamos aqui pra te ajudar a manter o código seguro. 💪'
 		);
 	} else if (installState === 'update') {
 		vscode.window.showInformationMessage(
-			'🛡️ Hotmart Cybersecurity atualizado. Hooks de segurança sincronizados.'
+			'[Hotmart AppSec] 🛡️ Extensão atualizada! Hooks e padrões de segurança corporativa sincronizados. Tudo certo por aqui. ✨'
 		);
 	}
 
@@ -741,7 +750,7 @@ async function applyFixWithAI(findingArg: unknown): Promise<void> {
 			const decoded = decodeURIComponent(String(findingArg));
 			finding = JSON.parse(decoded);
 		} catch {
-			vscode.window.showErrorMessage('Erro ao processar finding de segurança.');
+			vscode.window.showErrorMessage('[Hotmart AppSec] Ops, não conseguimos processar esse finding. Tente novamente ou entre em contato com o time de AppSec.');
 			console.error('applyFixWithAI error:', err, 'arg:', findingArg);
 			return;
 		}
@@ -752,7 +761,7 @@ async function applyFixWithAI(findingArg: unknown): Promise<void> {
 
 	// Copy to clipboard
 	await vscode.env.clipboard.writeText(prompt);
-	vscode.window.showInformationMessage('🛡️ Prompt de correção copiado! Cole no chat da IA (Cmd+V).');
+	vscode.window.showInformationMessage('[Hotmart AppSec] 🛡️ Prompt de correção copiado! Cole no chat da IA (Cmd+V) e deixa ela resolver pra você. 🚀');
 }
 
 function buildFixPrompt(finding: {
@@ -831,7 +840,7 @@ async function dismissFinding(findingArg: unknown, sidebarProvider: SecuritySide
 	updateDiagnostics(currentFindings);
 	sidebarProvider.updateFindings(currentFindings);
 
-	vscode.window.showInformationMessage(`🛡️ Finding ignorado como falso positivo.`);
+	vscode.window.showInformationMessage(`[Hotmart AppSec] 🛡️ Beleza, finding marcado como falso positivo. Valeu por revisar!`);
 }
 
 // ─── MARK FINDING AS FIXED ────────────────────────────────────────────────────
@@ -878,7 +887,21 @@ async function markFindingFixed(findingArg: unknown, sidebarProvider: SecuritySi
 	updateDiagnostics(currentFindings);
 	sidebarProvider.updateFindings(currentFindings);
 
-	vscode.window.showInformationMessage(`✅ Vulnerabilidade corrigida.`);
+	vscode.window.showInformationMessage(`[Hotmart AppSec] ✅ Vulnerabilidade corrigida! Mandou bem. 🎉`);
+}
+
+/**
+ * Normalizes an OpenGrep rule ID by stripping the machine-specific path prefix.
+ * Input:  "Users.leandro.andrade..kiro.extensions.hotmartcybersecurity.cybersecurityextension-0.8.4-universal.rules.dockerfile-run-as-root"
+ * Output: "rules.dockerfile-run-as-root"
+ */
+function normalizeRuleId(id: string): string {
+	const marker = '.rules.';
+	const idx = id.indexOf(marker);
+	if (idx !== -1) {
+		return id.substring(idx + 1);
+	}
+	return id;
 }
 
 /**
@@ -896,6 +919,9 @@ function persistDismissal(findingInfo: { id: string; file: string; line: number 
 		fs.mkdirSync(stateDir, { recursive: true });
 	}
 
+	// Normalize the ID to strip machine-specific path prefix
+	const normalizedId = normalizeRuleId(findingInfo.id);
+
 	// Load existing dismissals
 	let dismissed: Array<{ id: string; file: string; line: number; dismissedAt: string }> = [];
 	if (fs.existsSync(dismissedFile)) {
@@ -908,12 +934,14 @@ function persistDismissal(findingInfo: { id: string; file: string; line: number 
 
 	// Add new dismissal (avoid duplicates)
 	const alreadyDismissed = dismissed.some(d =>
-		d.id === findingInfo.id && d.file === findingInfo.file && d.line === findingInfo.line
+		normalizeRuleId(d.id) === normalizedId && d.file === findingInfo.file && d.line === findingInfo.line
 	);
 
 	if (!alreadyDismissed) {
 		dismissed.push({
-			...findingInfo,
+			id: normalizedId,
+			file: findingInfo.file,
+			line: findingInfo.line,
 			dismissedAt: new Date().toISOString(),
 		});
 		fs.writeFileSync(dismissedFile, JSON.stringify(dismissed, null, 2), 'utf-8');
@@ -928,9 +956,10 @@ function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvid
 	const listener = vscode.workspace.onDidSaveTextDocument((document) => {
 		const filePath = vscode.workspace.asRelativePath(document.uri);
 
-		// Only re-scan if we have active findings for this file
-		const hasFindings = currentFindings.some(f => f.file === filePath);
-		if (!hasFindings) {
+		// Always re-scan changed files on save so NEW vulnerabilities are detected
+		// even when there are no current findings (e.g. after fixing and reintroducing)
+		// Only skip files that are in excluded paths
+		if (isExcludedFilePath(filePath)) {
 			return;
 		}
 
@@ -952,6 +981,10 @@ function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvid
 				// Remove old findings for this file and replace with fresh ones
 				const otherFindings = currentFindings.filter(f => f.file !== filePath);
 				currentFindings = [...otherFindings, ...freshFindings];
+
+				// If findings changed (fixed or new ones appeared), reset the notification
+				// fingerprint so the git watcher will show a fresh notification on next stage
+				lastNotificationFingerprint = '';
 
 				// Update diagnostics and sidebar
 				updateDiagnostics(currentFindings);
@@ -998,42 +1031,54 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 
 	let debounceTimer: NodeJS.Timeout | undefined;
 	let scanPending = false;
+	let scanInProgress = false;
 
 	const triggerScan = () => {
+		// Prevent re-entrant scans (our own git commands can touch the index lock)
+		if (scanInProgress) { return; }
+
 		scanPending = true;
 		if (debounceTimer) {
 			clearTimeout(debounceTimer);
 		}
-		debounceTimer = setTimeout(() => {
+		debounceTimer = setTimeout(async () => {
 			if (!scanPending) { return; }
 			scanPending = false;
+			scanInProgress = true;
 
-			// Check current state of the working tree
-			let currentStaged = '';
 			try {
-				currentStaged = execSync('git diff --cached --name-only', { cwd: workspaceFolder, encoding: 'utf-8' });
-			} catch { /* */ }
+				// Check current state of the working tree
+				let currentStaged = '';
+				try {
+					currentStaged = execSync('git diff --cached --name-only', { cwd: workspaceFolder, encoding: 'utf-8' });
+				} catch { /* */ }
 
-			let currentUnstaged = '';
-			try {
-				currentUnstaged = execSync('git diff --name-only --diff-filter=d', { cwd: workspaceFolder, encoding: 'utf-8' });
-			} catch { /* */ }
+				let currentUnstaged = '';
+				try {
+					currentUnstaged = execSync('git diff --name-only --diff-filter=d', { cwd: workspaceFolder, encoding: 'utf-8' });
+				} catch { /* */ }
 
-			// If there's absolutely nothing to scan (clean tree), skip
-			if (currentStaged === '' && currentUnstaged === '') {
-				lastStagedSnapshot = '';
-				return;
+				// If there's absolutely nothing to scan (clean tree), skip
+				if (currentStaged === '' && currentUnstaged === '') {
+					lastStagedSnapshot = '';
+					return;
+				}
+
+				// Skip only if the staged file list is identical AND there are no
+				// unstaged changes. But if there ARE unstaged changes or the staged
+				// list changed, always scan (content may have changed even for same files).
+				if (currentStaged === lastStagedSnapshot && currentUnstaged === '') {
+					return;
+				}
+
+				// Something changed — run the scan
+				lastStagedSnapshot = currentStaged;
+				await onGitOperation(sidebarProvider);
+			} finally {
+				// Allow future scans after a short cooldown to absorb any index
+				// events triggered by our own git commands
+				setTimeout(() => { scanInProgress = false; }, 1500);
 			}
-
-			// If the staged snapshot is identical AND no unstaged changes exist,
-			// this is likely an IDE internal refresh — skip
-			if (currentStaged === lastStagedSnapshot && currentUnstaged === '') {
-				return;
-			}
-
-			// Something changed — run the scan
-			lastStagedSnapshot = currentStaged;
-			onGitOperation(sidebarProvider);
 		}, 800);
 	};
 
@@ -1076,6 +1121,7 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 // Track last notification fingerprint to avoid repeated popups
 let lastNotificationFingerprint = '';
 
+// Track whether we already prompted about outdated workflow in this session
 async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise<void> {
 	const findings = await runSecurityScan(sidebarProvider);
 
@@ -1098,14 +1144,14 @@ async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise
 	const highCount = findings.filter(f => f.severity === 'high').length;
 	const otherCount = findings.length - criticalCount - highCount;
 
-	let summary = '🛡️ Heads up! ';
+	let summary = '[Hotmart AppSec] 🛡️ Heads up! ';
 	const parts: string[] = [];
 	if (criticalCount > 0) { parts.push(`${criticalCount} critical`); }
 	if (highCount > 0) { parts.push(`${highCount} high`); }
 	if (otherCount > 0) { parts.push(`${otherCount} other`); }
 
-	summary += `Encontrei ${parts.join(', ')} finding(s) nas suas alterações. `;
-	summary += 'Vale dar uma olhada — a pipeline pode reclamar depois. 😉';
+	summary += `Encontramos ${parts.join(', ')} finding(s) nas suas alterações. `;
+	summary += 'Vale dar uma olhada antes do push — a pipeline pode reclamar depois. 😉';
 
 	const action = await vscode.window.showWarningMessage(
 		summary,
@@ -1123,7 +1169,7 @@ async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise
 async function bootstrapProject(context: vscode.ExtensionContext): Promise<void> {
 	const workspaceFolder = getWorkspaceFolder();
 	if (!workspaceFolder) {
-		vscode.window.showErrorMessage('Nenhum workspace aberto. Abra uma pasta para aplicar os padrões.');
+		vscode.window.showErrorMessage('[Hotmart AppSec] Nenhum workspace aberto. Abra uma pasta para aplicar os padrões de segurança corporativa.');
 		return;
 	}
 
@@ -1141,16 +1187,13 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 	// Install preToolUse hooks only for the detected IDE
 	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
 
-	// GitHub workflow is IDE-agnostic (CI/CD protection)
-	applied += await applyGitHubWorkflow(context, workspaceFolder);
-
 	if (applied > 0) {
 		vscode.window.showInformationMessage(
-			`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`
+			`[Hotmart AppSec] ✅ Padrões de segurança corporativa aplicados: ${applied} arquivo(s) configurado(s) para ${currentIde}. Tudo pronto! 🎯`
 		);
 	} else {
 		vscode.window.showInformationMessage(
-			`✅ Padrões de segurança já estão sincronizados para ${currentIde}. Nenhuma alteração necessária.`
+			`[Hotmart AppSec] ✅ Padrões de segurança corporativa já estão sincronizados para ${currentIde}. Nada pra fazer aqui. 👌`
 		);
 	}
 }
@@ -1158,7 +1201,7 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 async function updateStandards(context: vscode.ExtensionContext): Promise<void> {
 	const workspaceFolder = getWorkspaceFolder();
 	if (!workspaceFolder) {
-		vscode.window.showErrorMessage('Nenhum workspace aberto.');
+		vscode.window.showErrorMessage('[Hotmart AppSec] Nenhum workspace aberto para atualizar.');
 		return;
 	}
 
@@ -1171,9 +1214,9 @@ async function updateStandards(context: vscode.ExtensionContext): Promise<void> 
 	updated += await applyClaudeFiles(context, workspaceFolder, true);
 
 	if (updated > 0) {
-		vscode.window.showInformationMessage(`✅ Padrões atualizados: ${updated} arquivo(s) sincronizado(s) para ${detectIDE()}.`);
+		vscode.window.showInformationMessage(`[Hotmart AppSec] ✅ Padrões corporativos atualizados: ${updated} arquivo(s) sincronizado(s) para ${detectIDE()}. 🔄`);
 	} else {
-		vscode.window.showInformationMessage('Nenhum padrão encontrado para atualizar. Execute "Bootstrap Project" primeiro.');
+		vscode.window.showInformationMessage('[Hotmart AppSec] Tudo já está em dia! Nenhum padrão precisou de atualização. Execute "Bootstrap Project" se for a primeira vez.');
 	}
 }
 
@@ -1256,18 +1299,18 @@ async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFold
 
 	// Apply IDE-specific rule files (copilot-instructions.md, appsec-rules.mdc, etc.)
 	applied += await applyIdeSpecificFiles(context, workspaceFolder, force || silent);
-
 	// Always apply Claude rules (Claude Code can be used alongside any IDE)
 	applied += await applyClaudeFiles(context, workspaceFolder, force || silent);
 
 	// Install security hooks only for the current IDE
 	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
 
-	// GitHub workflow is IDE-agnostic (CI/CD protection)
-	applied += await applyGitHubWorkflow(context, workspaceFolder, force || silent);
+	// GitHub workflow is NOT applied automatically to avoid breaking CI/CD tools
+	// (GitHub Apps like Magic Deploy lack `workflows` permission).
+	// Use the manual "Bootstrap Project" command to install it.
 
 	if (!silent && applied > 0) {
-		vscode.window.showInformationMessage(`✅ Padrões de segurança aplicados: ${applied} arquivo(s) para ${currentIde}.`);
+		vscode.window.showInformationMessage(`[Hotmart AppSec] ✅ Padrões de segurança corporativa aplicados: ${applied} arquivo(s) para ${currentIde}. 🎯`);
 	}
 }
 
@@ -1375,31 +1418,6 @@ async function installClaudeHook(context: vscode.ExtensionContext, workspaceFold
 	return 1;
 }
 
-// ─── GITHUB WORKFLOW ──────────────────────────────────────────────────────────
-
-async function applyGitHubWorkflow(
-	context: vscode.ExtensionContext,
-	workspaceFolder: string,
-	overwrite: boolean = false
-): Promise<number> {
-	const targetDir = path.join(workspaceFolder, '.github', 'workflows');
-	const sourceDir = path.join(context.extensionPath, 'standards', 'github', 'workflows');
-
-	if (!fs.existsSync(targetDir)) {
-		fs.mkdirSync(targetDir, { recursive: true });
-	}
-
-	let count = 0;
-	for (const file of GITHUB_WORKFLOW_FILES) {
-		const source = path.join(sourceDir, file);
-		const dest = path.join(targetDir, file);
-		if (!fs.existsSync(source)) { continue; }
-		count += await copySingleFile(source, dest, file, overwrite);
-	}
-
-	return count;
-}
-
 /**
  * Applies IDE-specific rule files using the SAME pattern as applyClaudeFiles.
  * For VS Code: creates .github/copilot-instructions.md
@@ -1502,7 +1520,7 @@ async function copySingleFile(source: string, dest: string, fileName: string, ov
 
 		if (!overwrite) {
 			const action = await vscode.window.showWarningMessage(
-				`O arquivo "${fileName}" já existe e é diferente da versão corporativa. Sobrescrever?`,
+				`[Hotmart AppSec] O arquivo "${fileName}" já existe e difere da versão corporativa. Deseja atualizar para a versão mais recente?`,
 				'Sobrescrever',
 				'Manter atual'
 			);

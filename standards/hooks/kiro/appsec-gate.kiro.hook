@@ -1,7 +1,8 @@
 {
-  "enabled": true,
   "name": "AppSec Gate — Prompt Analysis",
-  "version": "1",
+  "version": "1.0.0",
+  "enabled": false,
+  "description": "Hook de segurança que analisa prompts. Distribuído via Git com enabled=false. O MDM install ativa em ~/.kiro/hooks/ com enabled=true para evitar execução duplicada em workspaces multi-root.",
   "when": {
     "type": "promptSubmit"
   },

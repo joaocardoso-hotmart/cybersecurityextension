@@ -57,12 +57,12 @@ export async function installOpenGrep(): Promise<boolean> {
 	);
 
 	if (result) {
-		vscode.window.showInformationMessage('✅ OpenGrep instalado com sucesso!');
+		vscode.window.showInformationMessage('[Hotmart AppSec] ✅ OpenGrep instalado com sucesso! Scanner de segurança pronto pra uso. 🔍');
 		return true;
 	}
 
 	const action = await vscode.window.showErrorMessage(
-		'Não foi possível instalar o OpenGrep automaticamente.',
+		'[Hotmart AppSec] Não conseguimos instalar o OpenGrep automaticamente. Sem ele, o scan de segurança não funciona.',
 		'Ver Instruções'
 	);
 
@@ -123,6 +123,20 @@ function formatTitle(checkId: string): string {
 }
 
 /**
+ * Normalizes an OpenGrep check_id by stripping the machine-specific path prefix.
+ * Input:  "Users.leandro.andrade..kiro.extensions.hotmartcybersecurity.cybersecurityextension-0.8.4-universal.rules.dockerfile-run-as-root"
+ * Output: "rules.dockerfile-run-as-root"
+ */
+function normalizeCheckId(checkId: string): string {
+	const marker = '.rules.';
+	const idx = checkId.indexOf(marker);
+	if (idx !== -1) {
+		return checkId.substring(idx + 1); // includes "rules."
+	}
+	return checkId;
+}
+
+/**
  * Runs OpenGrep on the specified files and returns findings.
  */
 export async function runOpenGrep(files: string[], workspaceFolder: string, extensionPath: string): Promise<SecurityFinding[]> {
@@ -160,7 +174,7 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 		}
 
 		if (!fs.existsSync(rulesPath)) {
-			vscode.window.showErrorMessage('🛡️ Arquivo de regras de segurança não encontrado.');
+			vscode.window.showErrorMessage('[Hotmart AppSec] Arquivo de regras de segurança não encontrado. Execute "Bootstrap Project" para configurar.');
 			return findings;
 		}
 
@@ -222,7 +236,7 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 			}
 
 			findings.push({
-				id: item.check_id || `OG_${Date.now()}`,
+				id: normalizeCheckId(item.check_id || `OG_${Date.now()}`),
 				severity,
 				title: formatTitle(item.check_id || message),
 				description: message,
