@@ -2,10 +2,25 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
-import { execSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
+import { promisify } from 'util';
 import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
 import { ensureOpenGrep, runOpenGrep } from './semgrep';
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Runs a git command asynchronously, returns trimmed stdout or empty string on error.
+ */
+async function gitCmd(args: string[], cwd: string): Promise<string> {
+	try {
+		const { stdout } = await execFileAsync('git', args, { cwd, encoding: 'utf-8', timeout: 10000 });
+		return stdout.trim();
+	} catch {
+		return '';
+	}
+}
 
 /**
  * Quick check for paths that should never be scanned on save.
@@ -1042,38 +1057,46 @@ function persistDismissal(findingInfo: { id: string; file: string; line: number 
 
 function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
 	let rescanTimer: NodeJS.Timeout | undefined;
+	const pendingFiles = new Set<string>();
 
 	const listener = vscode.workspace.onDidSaveTextDocument((document) => {
 		const filePath = vscode.workspace.asRelativePath(document.uri);
 
-		// Always re-scan changed files on save so NEW vulnerabilities are detected
-		// even when there are no current findings (e.g. after fixing and reintroducing)
-		// Only skip files that are in excluded paths
+		// Skip excluded paths early
 		if (isExcludedFilePath(filePath)) {
 			return;
 		}
 
-		// Debounce to avoid hammering the scanner on rapid saves
+		// Accumulate files saved in quick succession for batch scanning
+		pendingFiles.add(filePath);
+
+		// Debounce: wait for rapid saves to settle, then scan all pending files at once
 		if (rescanTimer) {
 			clearTimeout(rescanTimer);
 		}
 
 		rescanTimer = setTimeout(async () => {
+			if (pendingFiles.size === 0) { return; }
+
+			// Snapshot and clear pending files immediately to avoid race conditions
+			const filesToScan = [...pendingFiles];
+			pendingFiles.clear();
+
 			try {
 				const workspaceFolders = vscode.workspace.workspaceFolders;
 				if (!workspaceFolders) { return; }
 
 				const workspaceFolder = workspaceFolders[0].uri.fsPath;
 
-				// Re-scan only the saved file
-				const freshFindings = await runOpenGrep([filePath], workspaceFolder, context.extensionPath);
+				// Batch scan all saved files in one OpenGrep invocation
+				const freshFindings = await runOpenGrep(filesToScan, workspaceFolder, context.extensionPath);
 
-				// Remove old findings for this file and replace with fresh ones
-				const otherFindings = currentFindings.filter(f => f.file !== filePath);
+				// Remove old findings for scanned files and replace with fresh ones
+				const scannedSet = new Set(filesToScan);
+				const otherFindings = currentFindings.filter(f => !scannedSet.has(f.file));
 				currentFindings = [...otherFindings, ...freshFindings];
 
-				// If findings changed (fixed or new ones appeared), reset the notification
-				// fingerprint so the git watcher will show a fresh notification on next stage
+				// Reset notification fingerprint so git watcher shows fresh results
 				lastNotificationFingerprint = '';
 
 				// Update diagnostics and sidebar
@@ -1082,7 +1105,7 @@ function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvid
 			} catch (err) {
 				console.error('[Hotmart AppSec] File save re-scan error:', err);
 			}
-		}, 500);
+		}, 800);
 	});
 
 	context.subscriptions.push(listener);
@@ -1137,16 +1160,11 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 			scanInProgress = true;
 
 			try {
-				// Check current state of the working tree
-				let currentStaged = '';
-				try {
-					currentStaged = execSync('git diff --cached --name-only', { cwd: workspaceFolder, encoding: 'utf-8' });
-				} catch { /* */ }
-
-				let currentUnstaged = '';
-				try {
-					currentUnstaged = execSync('git diff --name-only --diff-filter=d', { cwd: workspaceFolder, encoding: 'utf-8' });
-				} catch { /* */ }
+				// Check current state of the working tree (non-blocking)
+				const [currentStaged, currentUnstaged] = await Promise.all([
+					gitCmd(['diff', '--cached', '--name-only'], workspaceFolder),
+					gitCmd(['diff', '--name-only', '--diff-filter=d'], workspaceFolder),
+				]);
 
 				// If there's absolutely nothing to scan (clean tree), skip
 				if (currentStaged === '' && currentUnstaged === '') {
@@ -1213,7 +1231,22 @@ let lastNotificationFingerprint = '';
 
 // Track whether we already prompted about outdated workflow in this session
 async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise<void> {
-	const findings = await runSecurityScan(sidebarProvider);
+	// Show minimalist progress notification during SAST scan
+	const findings = await vscode.window.withProgress(
+		{
+			location: vscode.ProgressLocation.Notification,
+			title: '🛡️ SAST rodando',
+			cancellable: false,
+		},
+		async (progress) => {
+			progress.report({ increment: 10, message: 'analisando alterações...' });
+
+			const result = await runSecurityScan(sidebarProvider);
+
+			progress.report({ increment: 90, message: 'concluído!' });
+			return result;
+		}
+	);
 
 	if (findings.length === 0) {
 		// Clear the fingerprint when no findings
@@ -1234,19 +1267,18 @@ async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise
 	const highCount = findings.filter(f => f.severity === 'high').length;
 	const otherCount = findings.length - criticalCount - highCount;
 
-	let summary = '[Hotmart AppSec] 🛡️ Heads up! ';
+	let summary = '🛡️ ';
 	const parts: string[] = [];
 	if (criticalCount > 0) { parts.push(`${criticalCount} critical`); }
 	if (highCount > 0) { parts.push(`${highCount} high`); }
 	if (otherCount > 0) { parts.push(`${otherCount} other`); }
 
-	summary += `Encontramos ${parts.join(', ')} finding(s) nas suas alterações. `;
-	summary += 'Vale dar uma olhada antes do push — a pipeline pode reclamar depois. 😉';
+	summary += `${parts.join(', ')} finding(s) detectado(s).`;
 
 	const action = await vscode.window.showWarningMessage(
 		summary,
 		'Ver Findings',
-		'Seguir em Frente'
+		'Ignorar'
 	);
 
 	if (action === 'Ver Findings') {

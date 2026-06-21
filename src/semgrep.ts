@@ -1,19 +1,55 @@
 import * as vscode from 'vscode';
-import { execSync, execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
+import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import { SecurityFinding, Severity, sortBySeverity } from './scanner';
 
+const execFileAsync = promisify(execFile);
+
+// Cache for OpenGrep availability — avoids spawning a process on every scan
+let _opengrepAvailable: boolean | null = null;
+
 /**
- * Checks if OpenGrep is installed on the system.
+ * Checks if OpenGrep is installed (cached after first successful check).
+ * Only re-checks if a previous install attempt was made.
  */
 export function isOpenGrepInstalled(): boolean {
+	if (_opengrepAvailable !== null) {
+		return _opengrepAvailable;
+	}
 	try {
-		execSync('opengrep --version', { encoding: 'utf-8', stdio: 'pipe' });
+		execFileSync('opengrep', ['--version'], { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 });
+		_opengrepAvailable = true;
 		return true;
 	} catch {
+		_opengrepAvailable = false;
 		return false;
 	}
+}
+
+/**
+ * Async version of isOpenGrepInstalled (non-blocking).
+ */
+async function checkOpenGrepAsync(): Promise<boolean> {
+	if (_opengrepAvailable !== null) {
+		return _opengrepAvailable;
+	}
+	try {
+		await execFileAsync('opengrep', ['--version'], { encoding: 'utf-8', timeout: 5000 });
+		_opengrepAvailable = true;
+		return true;
+	} catch {
+		_opengrepAvailable = false;
+		return false;
+	}
+}
+
+/**
+ * Invalidates the OpenGrep cache (call after install attempts).
+ */
+function invalidateOpenGrepCache(): void {
+	_opengrepAvailable = null;
 }
 
 /**
@@ -21,6 +57,8 @@ export function isOpenGrepInstalled(): boolean {
  * OpenGrep ships self-contained binaries — no Python needed.
  */
 export async function installOpenGrep(): Promise<boolean> {
+	invalidateOpenGrepCache();
+
 	const result = await vscode.window.withProgress(
 		{
 			location: vscode.ProgressLocation.Notification,
@@ -31,16 +69,19 @@ export async function installOpenGrep(): Promise<boolean> {
 			// macOS / Linux: use the official install script
 			try {
 				progress.report({ message: 'Baixando binário...' });
-				execSync(
-					'curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash',
-					{ encoding: 'utf-8', stdio: 'pipe', timeout: 120000, shell: '/bin/bash' }
-				);
+				await execFileAsync('bash', ['-c', 'curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash'], {
+					encoding: 'utf-8',
+					timeout: 120000,
+				});
 				return true;
 			} catch {
 				// Try brew as fallback
 				try {
 					progress.report({ message: 'Tentando via brew...' });
-					execSync('brew install opengrep/tap/opengrep', { encoding: 'utf-8', stdio: 'pipe', timeout: 120000 });
+					await execFileAsync('brew', ['install', 'opengrep/tap/opengrep'], {
+						encoding: 'utf-8',
+						timeout: 120000,
+					});
 					return true;
 				} catch { /* */ }
 			}
@@ -48,7 +89,10 @@ export async function installOpenGrep(): Promise<boolean> {
 			// Try pip as last resort (older method)
 			try {
 				progress.report({ message: 'Tentando via pip...' });
-				execSync('pip3 install opengrep', { encoding: 'utf-8', stdio: 'pipe', timeout: 120000 });
+				await execFileAsync('pip3', ['install', 'opengrep'], {
+					encoding: 'utf-8',
+					timeout: 120000,
+				});
 				return true;
 			} catch { /* */ }
 
@@ -57,6 +101,7 @@ export async function installOpenGrep(): Promise<boolean> {
 	);
 
 	if (result) {
+		invalidateOpenGrepCache();
 		vscode.window.showInformationMessage('[Hotmart AppSec] ✅ OpenGrep instalado com sucesso! Scanner de segurança pronto pra uso. 🔍');
 		return true;
 	}
@@ -75,9 +120,10 @@ export async function installOpenGrep(): Promise<boolean> {
 
 /**
  * Ensures OpenGrep is available. Installs silently if needed.
+ * Uses async check to avoid blocking the extension host.
  */
 export async function ensureOpenGrep(): Promise<boolean> {
-	if (isOpenGrepInstalled()) {
+	if (await checkOpenGrepAsync()) {
 		return true;
 	}
 
@@ -138,22 +184,21 @@ function normalizeCheckId(checkId: string): string {
 
 /**
  * Runs OpenGrep on the specified files and returns findings.
+ * Fully async — does not block the extension host thread.
  */
 export async function runOpenGrep(files: string[], workspaceFolder: string, extensionPath: string): Promise<SecurityFinding[]> {
 	if (files.length === 0) {
 		return [];
 	}
 
-	if (!isOpenGrepInstalled()) {
+	if (!await checkOpenGrepAsync()) {
 		return [];
 	}
 
 	const findings: SecurityFinding[] = [];
 
 	try {
-		// Build absolute file paths (passed as separate argv entries — no shell interpolation,
-		// so filenames with parentheses, spaces or other special chars work correctly).
-		// Filter out files that no longer exist on disk (e.g. deleted files from git diff).
+		// Build absolute file paths — filter out files that no longer exist on disk.
 		const filePaths = files
 			.map(f => path.join(workspaceFolder, f))
 			.filter(f => fs.existsSync(f));
@@ -178,20 +223,18 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 			return findings;
 		}
 
-		// Run opengrep with local rules (no internet needed).
-		// Use execFileSync with argv array so paths with parentheses/spaces are passed
-		// safely without going through a shell.
+		// Run opengrep asynchronously with argv array (safe for paths with special chars)
 		const args = ['scan', '--json', '--quiet', `--config=${rulesPath}`, ...filePaths];
 
 		let output: string;
 		try {
-			output = execFileSync('opengrep', args, {
+			const result = await execFileAsync('opengrep', args, {
 				cwd: workspaceFolder,
 				encoding: 'utf-8',
 				maxBuffer: 50 * 1024 * 1024,
 				timeout: 90000,
-				stdio: ['pipe', 'pipe', 'pipe'],
 			});
+			output = result.stdout;
 		} catch (execErr: unknown) {
 			// OpenGrep returns exit code 1 when findings exist — parse stdout
 			if (execErr && typeof execErr === 'object' && 'stdout' in execErr) {
