@@ -764,7 +764,13 @@ rules:
     patterns:
       - pattern-either:
           - pattern: jwt.decode($TOKEN)
-          - pattern: $JWT.decode($TOKEN)
+          - pattern: jwt.decode($TOKEN, ...)
+          - pattern: jsonwebtoken.decode($TOKEN)
+          - pattern: jsonwebtoken.decode($TOKEN, ...)
+          - pattern: jwtDecode($TOKEN)
+          - pattern: jwt_decode($TOKEN)
+          - pattern: jose.decodeJwt($TOKEN)
+          - pattern: jose.decodeProtectedHeader($TOKEN)
     message: "jwt.decode() não verifica a assinatura. Use jwt.verify() com secret/key."
     languages: [typescript, javascript]
     severity: ERROR

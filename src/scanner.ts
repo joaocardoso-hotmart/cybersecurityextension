@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
-import { execSync } from 'child_process';
-import * as path from 'path';
-import * as fs from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { runOpenGrep } from './semgrep';
+
+const execFileAsync = promisify(execFile);
 
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
@@ -123,47 +124,53 @@ function decodeGitFilename(raw: string): string {
 }
 
 /**
- * Gets the list of changed/new files from git.
+ * Regex for scannable source code file extensions.
  */
-function getChangedFiles(workspaceFolder: string): string[] {
+const CODE_FILE_PATTERN = /\.(ts|tsx|js|jsx|mjs|cjs|java|kt|kts|py|pyi|go|rb|erb|rake|php|phtml|c|h|cpp|cc|cxx|hpp|cs|swift|rs|scala|sc|tf|tfvars|hcl|ya?ml|json)$/i;
+const SPECIAL_FILE_PATTERN = /(^|\/)Dockerfile(\..+)?$|(?:^|\/)Gemfile$|(?:^|\/)Rakefile$/i;
+
+function isScannableFile(f: string): boolean {
+	return !isExcludedFile(f) && (CODE_FILE_PATTERN.test(f) || SPECIAL_FILE_PATTERN.test(f));
+}
+
+/**
+ * Runs a git command asynchronously and returns trimmed stdout.
+ * Returns empty string on any error (not a git repo, command failed, etc.)
+ */
+async function gitCommand(args: string[], cwd: string): Promise<string> {
+	try {
+		const { stdout } = await execFileAsync('git', args, {
+			cwd,
+			encoding: 'utf-8',
+			maxBuffer: 10 * 1024 * 1024,
+			timeout: 15000,
+		});
+		return stdout.trim();
+	} catch {
+		return '';
+	}
+}
+
+/**
+ * Gets the list of changed/new files from git (async, non-blocking).
+ */
+async function getChangedFiles(workspaceFolder: string): Promise<string[]> {
 	const files = new Set<string>();
 
-	try {
-		// Unstaged modified files (exclude deletions with --diff-filter=d)
-		try {
-			const out = execSync('git -c core.quotePath=false diff --name-only --diff-filter=d', { cwd: workspaceFolder, encoding: 'utf-8', stdio: 'pipe' });
-			if (out.trim()) {
-				for (const f of out.trim().split('\n')) { files.add(decodeGitFilename(f)); }
-			}
-		} catch { /* */ }
+	// Run all three git commands in parallel for speed
+	const [unstaged, staged, untracked] = await Promise.all([
+		gitCommand(['-c', 'core.quotePath=false', 'diff', '--name-only', '--diff-filter=d'], workspaceFolder),
+		gitCommand(['-c', 'core.quotePath=false', 'diff', '--cached', '--name-only', '--diff-filter=d'], workspaceFolder),
+		gitCommand(['-c', 'core.quotePath=false', 'ls-files', '--others', '--exclude-standard'], workspaceFolder),
+	]);
 
-		// Staged files (exclude deletions with --diff-filter=d)
-		try {
-			const out = execSync('git -c core.quotePath=false diff --cached --name-only --diff-filter=d', { cwd: workspaceFolder, encoding: 'utf-8', stdio: 'pipe' });
-			if (out.trim()) {
-				for (const f of out.trim().split('\n')) { files.add(decodeGitFilename(f)); }
-			}
-		} catch { /* */ }
+	for (const out of [unstaged, staged, untracked]) {
+		if (out) {
+			for (const f of out.split('\n')) { files.add(decodeGitFilename(f)); }
+		}
+	}
 
-		// Untracked files
-		try {
-			const out = execSync('git -c core.quotePath=false ls-files --others --exclude-standard', { cwd: workspaceFolder, encoding: 'utf-8', stdio: 'pipe' });
-			if (out.trim()) {
-				for (const f of out.trim().split('\n')) { files.add(decodeGitFilename(f)); }
-			}
-		} catch { /* */ }
-	} catch { /* not a git repo */ }
-
-	// Filter out excluded files and non-code files
-	return Array.from(files).filter(f => {
-		if (isExcludedFile(f)) { return false; }
-		// Source code: ts, tsx, js, jsx, java, kotlin, python, go, ruby, php, c/cpp, c#,
-		// swift, rust, scala. Plus IaC/config: terraform, yaml, json, dockerfile.
-		return /\.(ts|tsx|js|jsx|mjs|cjs|java|kt|kts|py|pyi|go|rb|erb|rake|php|phtml|c|h|cpp|cc|cxx|hpp|cs|swift|rs|scala|sc|tf|tfvars|hcl|ya?ml|json)$/i.test(f)
-			|| /(^|\/)Dockerfile(\..+)?$/i.test(f)
-			|| /(^|\/)Gemfile$/i.test(f)
-			|| /(^|\/)Rakefile$/i.test(f);
-	});
+	return Array.from(files).filter(isScannableFile);
 }
 
 /**
@@ -176,7 +183,7 @@ export async function scanChangedLines(): Promise<SecurityFinding[]> {
 	}
 
 	const workspaceFolder = workspaceFolders[0].uri.fsPath;
-	const changedFiles = getChangedFiles(workspaceFolder);
+	const changedFiles = await getChangedFiles(workspaceFolder);
 
 	if (changedFiles.length === 0) {
 		return [];
@@ -222,17 +229,15 @@ export async function scanAllWorkspaceFiles(): Promise<SecurityFinding[]> {
 
 	const workspaceFolder = workspaceFolders[0].uri.fsPath;
 
-	// Get all tracked + changed + untracked files
-	const changedFiles = getChangedFiles(workspaceFolder);
+	// Get all tracked + changed + untracked files in parallel
+	const [changedFiles, trackedOutput] = await Promise.all([
+		getChangedFiles(workspaceFolder),
+		gitCommand(['ls-files'], workspaceFolder),
+	]);
 
-	// Also get all tracked files from git
-	let allTracked: string[] = [];
-	try {
-		const out = execSync('git ls-files', { cwd: workspaceFolder, encoding: 'utf-8', stdio: 'pipe' });
-		if (out.trim()) {
-			allTracked = out.trim().split('\n').map(f => decodeGitFilename(f));
-		}
-	} catch { /* not a git repo */ }
+	const allTracked = trackedOutput
+		? trackedOutput.split('\n').map(f => decodeGitFilename(f))
+		: [];
 
 	// Merge and deduplicate
 	const allFiles = [...new Set([...changedFiles, ...allTracked])].filter(f => {
