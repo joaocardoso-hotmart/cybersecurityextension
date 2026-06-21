@@ -1,6 +1,6 @@
 #!/bin/bash
 # AppSec Pre-Commit Hook — Advisory Only
-STATE_DIR=".appsec-state"
+STATE_DIR=".appsec"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"
 

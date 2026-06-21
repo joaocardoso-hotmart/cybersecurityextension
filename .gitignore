@@ -17,7 +17,6 @@ node_modules/
 
 ## Runtime state (local dev only)
 .appsec/
-.appsec-state/
 
 ## OS files
 .DS_Store

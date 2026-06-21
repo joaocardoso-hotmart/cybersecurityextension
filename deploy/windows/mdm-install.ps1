@@ -343,7 +343,7 @@ function Install-PreCommitHooks([string]$UserHome) {
     $hookContent = @'
 #!/bin/bash
 # AppSec Pre-Commit Hook — Advisory Only
-STATE_DIR=".appsec-state"
+STATE_DIR=".appsec"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"
 STAGED=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')

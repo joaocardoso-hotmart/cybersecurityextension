@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
 import { execSync } from 'child_process';
 import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
@@ -119,6 +120,12 @@ export function activate(context: vscode.ExtensionContext) {
 	const installState = detectInstallOrUpdate(context);
 	const force = installState !== 'none';
 
+	// Migrate legacy .appsec-state/ folder into .appsec/ (consolidation in v0.9+)
+	if (force) {
+		migrateLegacyAppsecState();
+		cleanupLegacyGlobalKiroHook();
+	}
+
 	// Fix global steering file if it exists but is missing description (legacy MDM installs)
 	ensureGlobalSteeringFile(context);
 
@@ -151,6 +158,9 @@ export function activate(context: vscode.ExtensionContext) {
 			ensureIdeRuleFilesAllWorkspaces(context, false);
 		})
 	);
+
+	// Check for newer version in the marketplace and alert the user
+	checkForExtensionUpdate(context);
 }
 
 /**
@@ -179,6 +189,82 @@ function detectInstallOrUpdate(context: vscode.ExtensionContext): 'install' | 'u
 	}
 
 	return 'none';
+}
+
+/**
+ * Migrates the legacy `.appsec-state/` folder into `.appsec/`.
+ * Moves `dismissed.json` if it exists in the old location, then removes the empty folder.
+ * Runs on install/update so devs who had the old layout get cleaned up automatically.
+ */
+function migrateLegacyAppsecState(): void {
+	const folders = vscode.workspace.workspaceFolders;
+	if (!folders || folders.length === 0) { return; }
+
+	for (const folder of folders) {
+		const workspaceFolder = folder.uri.fsPath;
+		const legacyDir = path.join(workspaceFolder, '.appsec-state');
+		const legacyFile = path.join(legacyDir, 'dismissed.json');
+		const newDir = path.join(workspaceFolder, '.appsec');
+		const newFile = path.join(newDir, 'dismissed.json');
+
+		if (!fs.existsSync(legacyDir)) { continue; }
+
+		try {
+			// Move dismissed.json to the new location (merge if both exist)
+			if (fs.existsSync(legacyFile)) {
+				if (!fs.existsSync(newDir)) {
+					fs.mkdirSync(newDir, { recursive: true });
+				}
+
+				if (fs.existsSync(newFile)) {
+					// Merge: combine both arrays, dedup by id+file+line
+					const oldData = JSON.parse(fs.readFileSync(legacyFile, 'utf-8')) as Array<{ id: string; file: string; line: number }>;
+					const newData = JSON.parse(fs.readFileSync(newFile, 'utf-8')) as Array<{ id: string; file: string; line: number }>;
+					const seen = new Set(newData.map(d => `${d.id}:${d.file}:${d.line}`));
+					for (const entry of oldData) {
+						if (!seen.has(`${entry.id}:${entry.file}:${entry.line}`)) {
+							newData.push(entry);
+						}
+					}
+					fs.writeFileSync(newFile, JSON.stringify(newData, null, 2), 'utf-8');
+				} else {
+					// Simply move the file
+					fs.copyFileSync(legacyFile, newFile);
+				}
+				fs.unlinkSync(legacyFile);
+			}
+
+			// Remove the legacy directory if now empty
+			const remaining = fs.readdirSync(legacyDir);
+			if (remaining.length === 0) {
+				fs.rmdirSync(legacyDir);
+				console.log(`[Hotmart AppSec] Migrated .appsec-state/ → .appsec/ in ${workspaceFolder}`);
+			}
+		} catch (err) {
+			console.warn(`[Hotmart AppSec] Migration of .appsec-state failed:`, err);
+		}
+	}
+}
+
+/**
+ * Removes the legacy `.kiro.hook` file from the user-level hooks directory (~/.kiro/hooks/).
+ * Previous versions (and MDM installs) placed this file there, but Kiro requires `.json` format.
+ */
+function cleanupLegacyGlobalKiroHook(): void {
+	if (detectIDE() !== 'kiro') { return; }
+
+	const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+	if (!homeDir) { return; }
+
+	const legacyHook = path.join(homeDir, '.kiro', 'hooks', 'appsec-gate.kiro.hook');
+	try {
+		if (fs.existsSync(legacyHook)) {
+			fs.unlinkSync(legacyHook);
+			console.log(`[Hotmart AppSec] Removed legacy global hook: ${legacyHook}`);
+		}
+	} catch (err) {
+		console.warn(`[Hotmart AppSec] Could not remove legacy global hook:`, err);
+	}
 }
 
 /**
@@ -395,16 +481,16 @@ function installKiroHookOnActivate(
 	force: boolean
 ): void {
 	const hooksDir = path.join(workspaceFolder, '.kiro', 'hooks');
-	const hookFile = path.join(hooksDir, 'appsec-gate.kiro.hook');
+	const hookFile = path.join(hooksDir, 'appsec-gate.json');
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.kiro.hook');
+	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.json');
 	if (!fs.existsSync(sourceFile)) {
 		console.error(`[Hotmart AppSec] missing kiro hook source: ${sourceFile}`);
 		return;
 	}
 
 	if (fs.existsSync(hookFile) && !force) {
-		// Clean up legacy file from previous versions of the extension
+		// Clean up legacy files from previous versions of the extension
 		cleanupLegacyKiroHook(hooksDir);
 		return;
 	}
@@ -419,18 +505,22 @@ function installKiroHookOnActivate(
 }
 
 /**
- * Removes the legacy `.json` Kiro hook left by older versions of this extension.
- * Kiro recognizes only `.kiro.hook` files, so the `.json` is dead weight.
+ * Removes legacy Kiro hook files left by older versions of this extension.
+ * Current format is `.json` (Kiro v2 schema). Old formats: `.kiro.hook`.
  */
 function cleanupLegacyKiroHook(hooksDir: string): void {
-	const legacy = path.join(hooksDir, 'appsec-gate.json');
-	try {
-		if (fs.existsSync(legacy)) {
-			fs.unlinkSync(legacy);
-			console.log(`[Hotmart AppSec] Removed legacy hook ${legacy}`);
+	const legacyFiles = [
+		path.join(hooksDir, 'appsec-gate.kiro.hook'),
+	];
+	for (const legacy of legacyFiles) {
+		try {
+			if (fs.existsSync(legacy)) {
+				fs.unlinkSync(legacy);
+				console.log(`[Hotmart AppSec] Removed legacy hook ${legacy}`);
+			}
+		} catch (err) {
+			console.warn(`[Hotmart AppSec] Could not remove legacy hook: ${err}`);
 		}
-	} catch (err) {
-		console.warn(`[Hotmart AppSec] Could not remove legacy hook: ${err}`);
 	}
 }
 
@@ -905,14 +995,14 @@ function normalizeRuleId(id: string): string {
 }
 
 /**
- * Persists a dismissed finding to .appsec-state/dismissed.json
+ * Persists a dismissed finding to .appsec/dismissed.json
  * so the pre-commit hook can skip it.
  */
 function persistDismissal(findingInfo: { id: string; file: string; line: number }): void {
 	const workspaceFolder = getWorkspaceFolder();
 	if (!workspaceFolder) { return; }
 
-	const stateDir = path.join(workspaceFolder, '.appsec-state');
+	const stateDir = path.join(workspaceFolder, '.appsec');
 	const dismissedFile = path.join(stateDir, 'dismissed.json');
 
 	if (!fs.existsSync(stateDir)) {
@@ -1262,7 +1352,6 @@ function ensureLinterIgnores(workspaceFolder: string): void {
 		'.cursor/rules/',
 		'.github/copilot-instructions.md',
 		'.appsec/',
-		'.appsec-state/',
 	];
 
 	const APPSEC_MARKER = '# AppSec protected paths (do not format)';
@@ -1381,7 +1470,7 @@ async function installCursorHook(context: vscode.ExtensionContext, workspaceFold
 
 async function installKiroHook(context: vscode.ExtensionContext, workspaceFolder: string): Promise<number> {
 	const hooksDir = path.join(workspaceFolder, '.kiro', 'hooks');
-	const hookFile = path.join(hooksDir, 'appsec-gate.kiro.hook');
+	const hookFile = path.join(hooksDir, 'appsec-gate.json');
 
 	// Don't overwrite if already exists
 	if (fs.existsSync(hookFile)) {
@@ -1389,7 +1478,7 @@ async function installKiroHook(context: vscode.ExtensionContext, workspaceFolder
 		return 0;
 	}
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.kiro.hook');
+	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.json');
 	if (!fs.existsSync(sourceFile)) {
 		return 0;
 	}
@@ -1539,6 +1628,131 @@ function getWorkspaceFolder(): string | undefined {
 		return undefined;
 	}
 	return folders[0].uri.fsPath;
+}
+
+// ─── UPDATE CHECK ─────────────────────────────────────────────────────────────
+
+/**
+ * Queries the VS Code Marketplace for the latest published version of the extension.
+ * If a newer version is available, shows a warning notification encouraging the user
+ * to update, emphasizing security fixes and bug corrections.
+ *
+ * Runs once per activation with a short delay so it doesn't block startup.
+ */
+function checkForExtensionUpdate(context: vscode.ExtensionContext): void {
+	const CHECK_INTERVAL_KEY = 'hotmartAppSec.lastUpdateCheck';
+	const ONE_HOUR_MS = 60 * 60 * 1000;
+
+	// Throttle: only check once per hour to avoid excessive network calls
+	const lastCheck = context.globalState.get<number>(CHECK_INTERVAL_KEY, 0);
+	if (Date.now() - lastCheck < ONE_HOUR_MS) {
+		return;
+	}
+
+	// Delay the check so it doesn't slow down activation
+	setTimeout(async () => {
+		try {
+			const currentVersion = (context.extension?.packageJSON?.version as string) || '0.0.0';
+			const latestVersion = await fetchLatestMarketplaceVersion();
+
+			if (!latestVersion) { return; }
+
+			void context.globalState.update(CHECK_INTERVAL_KEY, Date.now());
+
+			if (isNewerVersion(latestVersion, currentVersion)) {
+				const action = await vscode.window.showWarningMessage(
+					`[Hotmart AppSec] 🛡️ Nova versão disponível (v${latestVersion})! ` +
+					`Esta atualização contém correções de bugs e melhorias de segurança importantes. ` +
+					`Atualize agora para manter seu ambiente protegido contra as vulnerabilidades mais recentes.`,
+					'Atualizar Agora',
+					'Depois'
+				);
+
+				if (action === 'Atualizar Agora') {
+					// Opens the extension page in the Extensions view so the user can update
+					await vscode.commands.executeCommand(
+						'workbench.extensions.action.showExtensionsWithIds',
+						['HotmartCybersecurity.cybersecurityextension']
+					);
+				}
+			}
+		} catch (err) {
+			console.error('[Hotmart AppSec] Update check failed:', err);
+		}
+	}, 5000);
+}
+
+/**
+ * Fetches the latest version from the VS Code Marketplace API.
+ * Uses the public query endpoint to avoid requiring authentication.
+ */
+async function fetchLatestMarketplaceVersion(): Promise<string | null> {
+	try {
+		const postData = JSON.stringify({
+			filters: [{
+				criteria: [
+					{ filterType: 7, value: 'HotmartCybersecurity.cybersecurityextension' }
+				]
+			}],
+			flags: 0x1 // IncludeVersions
+		});
+
+		return new Promise<string | null>((resolve) => {
+			const req = https.request({
+				hostname: 'marketplace.visualstudio.com',
+				path: '/_apis/public/gallery/extensionquery',
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Accept': 'application/json;api-version=6.1-preview.1',
+					'Content-Length': Buffer.byteLength(postData),
+				},
+				timeout: 10000,
+			}, (res) => {
+				let data = '';
+				res.on('data', (chunk: string) => { data += chunk; });
+				res.on('end', () => {
+					try {
+						const json = JSON.parse(data);
+						const extensions = json?.results?.[0]?.extensions;
+						if (extensions && extensions.length > 0) {
+							const versions = extensions[0]?.versions;
+							if (versions && versions.length > 0) {
+								resolve(versions[0].version as string);
+								return;
+							}
+						}
+						resolve(null);
+					} catch {
+						resolve(null);
+					}
+				});
+			});
+
+			req.on('error', () => resolve(null));
+			req.on('timeout', () => { req.destroy(); resolve(null); });
+			req.write(postData);
+			req.end();
+		});
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Returns true if `latest` is a newer semver than `current`.
+ */
+function isNewerVersion(latest: string, current: string): boolean {
+	const latestParts = latest.split('.').map(Number);
+	const currentParts = current.split('.').map(Number);
+
+	for (let i = 0; i < 3; i++) {
+		const l = latestParts[i] || 0;
+		const c = currentParts[i] || 0;
+		if (l > c) { return true; }
+		if (l < c) { return false; }
+	}
+	return false;
 }
 
 export function deactivate() {
