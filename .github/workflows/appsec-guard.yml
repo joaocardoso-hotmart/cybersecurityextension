@@ -243,8 +243,8 @@ jobs:
             fi
           fi
 
-          # Also check if .appsec/dismissed.json was tampered
-          DISMISSED_FILE=".appsec/dismissed.json"
+          # Also check if .appsec-state/dismissed.json was tampered
+          DISMISSED_FILE=".appsec-state/dismissed.json"
           if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${DISMISSED_FILE}$"; then
             # Check if ALL findings were dismissed (suspicious bulk dismiss)
             if [ -f "$DISMISSED_FILE" ]; then
@@ -356,7 +356,7 @@ jobs:
         id: scan
         run: |
           RULES_FILE="rules/security.yml"
-          DISMISSED_FILE=".appsec/dismissed.json"
+          DISMISSED_FILE=".appsec-state/dismissed.json"
 
           if [ ! -f "$RULES_FILE" ]; then
             echo "Rules file not found — skipping"

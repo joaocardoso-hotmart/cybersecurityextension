@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
 import { execSync } from 'child_process';
 import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
@@ -157,6 +158,9 @@ export function activate(context: vscode.ExtensionContext) {
 			ensureIdeRuleFilesAllWorkspaces(context, false);
 		})
 	);
+
+	// Check for newer version in the marketplace and alert the user
+	checkForExtensionUpdate(context);
 }
 
 /**
@@ -1624,6 +1628,131 @@ function getWorkspaceFolder(): string | undefined {
 		return undefined;
 	}
 	return folders[0].uri.fsPath;
+}
+
+// ─── UPDATE CHECK ─────────────────────────────────────────────────────────────
+
+/**
+ * Queries the VS Code Marketplace for the latest published version of the extension.
+ * If a newer version is available, shows a warning notification encouraging the user
+ * to update, emphasizing security fixes and bug corrections.
+ *
+ * Runs once per activation with a short delay so it doesn't block startup.
+ */
+function checkForExtensionUpdate(context: vscode.ExtensionContext): void {
+	const CHECK_INTERVAL_KEY = 'hotmartAppSec.lastUpdateCheck';
+	const ONE_HOUR_MS = 60 * 60 * 1000;
+
+	// Throttle: only check once per hour to avoid excessive network calls
+	const lastCheck = context.globalState.get<number>(CHECK_INTERVAL_KEY, 0);
+	if (Date.now() - lastCheck < ONE_HOUR_MS) {
+		return;
+	}
+
+	// Delay the check so it doesn't slow down activation
+	setTimeout(async () => {
+		try {
+			const currentVersion = (context.extension?.packageJSON?.version as string) || '0.0.0';
+			const latestVersion = await fetchLatestMarketplaceVersion();
+
+			if (!latestVersion) { return; }
+
+			void context.globalState.update(CHECK_INTERVAL_KEY, Date.now());
+
+			if (isNewerVersion(latestVersion, currentVersion)) {
+				const action = await vscode.window.showWarningMessage(
+					`[Hotmart AppSec] 🛡️ Nova versão disponível (v${latestVersion})! ` +
+					`Esta atualização contém correções de bugs e melhorias de segurança importantes. ` +
+					`Atualize agora para manter seu ambiente protegido contra as vulnerabilidades mais recentes.`,
+					'Atualizar Agora',
+					'Depois'
+				);
+
+				if (action === 'Atualizar Agora') {
+					// Opens the extension page in the Extensions view so the user can update
+					await vscode.commands.executeCommand(
+						'workbench.extensions.action.showExtensionsWithIds',
+						['HotmartCybersecurity.cybersecurityextension']
+					);
+				}
+			}
+		} catch (err) {
+			console.error('[Hotmart AppSec] Update check failed:', err);
+		}
+	}, 5000);
+}
+
+/**
+ * Fetches the latest version from the VS Code Marketplace API.
+ * Uses the public query endpoint to avoid requiring authentication.
+ */
+async function fetchLatestMarketplaceVersion(): Promise<string | null> {
+	try {
+		const postData = JSON.stringify({
+			filters: [{
+				criteria: [
+					{ filterType: 7, value: 'HotmartCybersecurity.cybersecurityextension' }
+				]
+			}],
+			flags: 0x1 // IncludeVersions
+		});
+
+		return new Promise<string | null>((resolve) => {
+			const req = https.request({
+				hostname: 'marketplace.visualstudio.com',
+				path: '/_apis/public/gallery/extensionquery',
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+					'Accept': 'application/json;api-version=6.1-preview.1',
+					'Content-Length': Buffer.byteLength(postData),
+				},
+				timeout: 10000,
+			}, (res) => {
+				let data = '';
+				res.on('data', (chunk: string) => { data += chunk; });
+				res.on('end', () => {
+					try {
+						const json = JSON.parse(data);
+						const extensions = json?.results?.[0]?.extensions;
+						if (extensions && extensions.length > 0) {
+							const versions = extensions[0]?.versions;
+							if (versions && versions.length > 0) {
+								resolve(versions[0].version as string);
+								return;
+							}
+						}
+						resolve(null);
+					} catch {
+						resolve(null);
+					}
+				});
+			});
+
+			req.on('error', () => resolve(null));
+			req.on('timeout', () => { req.destroy(); resolve(null); });
+			req.write(postData);
+			req.end();
+		});
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Returns true if `latest` is a newer semver than `current`.
+ */
+function isNewerVersion(latest: string, current: string): boolean {
+	const latestParts = latest.split('.').map(Number);
+	const currentParts = current.split('.').map(Number);
+
+	for (let i = 0; i < 3; i++) {
+		const l = latestParts[i] || 0;
+		const c = currentParts[i] || 0;
+		if (l > c) { return true; }
+		if (l < c) { return false; }
+	}
+	return false;
 }
 
 export function deactivate() {
