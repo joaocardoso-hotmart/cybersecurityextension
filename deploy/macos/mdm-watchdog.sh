@@ -179,7 +179,7 @@ ensure_precommit_hooks() {
   local hook_content
   hook_content='#!/bin/bash
 # AppSec Pre-Commit Hook — Advisory Only
-STATE_DIR=".appsec-state"
+STATE_DIR=".appsec"
 DISMISSED_FILE="$STATE_DIR/dismissed.json"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"

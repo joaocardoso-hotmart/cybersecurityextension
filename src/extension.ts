@@ -119,6 +119,12 @@ export function activate(context: vscode.ExtensionContext) {
 	const installState = detectInstallOrUpdate(context);
 	const force = installState !== 'none';
 
+	// Migrate legacy .appsec-state/ folder into .appsec/ (consolidation in v0.9+)
+	if (force) {
+		migrateLegacyAppsecState();
+		cleanupLegacyGlobalKiroHook();
+	}
+
 	// Fix global steering file if it exists but is missing description (legacy MDM installs)
 	ensureGlobalSteeringFile(context);
 
@@ -179,6 +185,82 @@ function detectInstallOrUpdate(context: vscode.ExtensionContext): 'install' | 'u
 	}
 
 	return 'none';
+}
+
+/**
+ * Migrates the legacy `.appsec-state/` folder into `.appsec/`.
+ * Moves `dismissed.json` if it exists in the old location, then removes the empty folder.
+ * Runs on install/update so devs who had the old layout get cleaned up automatically.
+ */
+function migrateLegacyAppsecState(): void {
+	const folders = vscode.workspace.workspaceFolders;
+	if (!folders || folders.length === 0) { return; }
+
+	for (const folder of folders) {
+		const workspaceFolder = folder.uri.fsPath;
+		const legacyDir = path.join(workspaceFolder, '.appsec-state');
+		const legacyFile = path.join(legacyDir, 'dismissed.json');
+		const newDir = path.join(workspaceFolder, '.appsec');
+		const newFile = path.join(newDir, 'dismissed.json');
+
+		if (!fs.existsSync(legacyDir)) { continue; }
+
+		try {
+			// Move dismissed.json to the new location (merge if both exist)
+			if (fs.existsSync(legacyFile)) {
+				if (!fs.existsSync(newDir)) {
+					fs.mkdirSync(newDir, { recursive: true });
+				}
+
+				if (fs.existsSync(newFile)) {
+					// Merge: combine both arrays, dedup by id+file+line
+					const oldData = JSON.parse(fs.readFileSync(legacyFile, 'utf-8')) as Array<{ id: string; file: string; line: number }>;
+					const newData = JSON.parse(fs.readFileSync(newFile, 'utf-8')) as Array<{ id: string; file: string; line: number }>;
+					const seen = new Set(newData.map(d => `${d.id}:${d.file}:${d.line}`));
+					for (const entry of oldData) {
+						if (!seen.has(`${entry.id}:${entry.file}:${entry.line}`)) {
+							newData.push(entry);
+						}
+					}
+					fs.writeFileSync(newFile, JSON.stringify(newData, null, 2), 'utf-8');
+				} else {
+					// Simply move the file
+					fs.copyFileSync(legacyFile, newFile);
+				}
+				fs.unlinkSync(legacyFile);
+			}
+
+			// Remove the legacy directory if now empty
+			const remaining = fs.readdirSync(legacyDir);
+			if (remaining.length === 0) {
+				fs.rmdirSync(legacyDir);
+				console.log(`[Hotmart AppSec] Migrated .appsec-state/ → .appsec/ in ${workspaceFolder}`);
+			}
+		} catch (err) {
+			console.warn(`[Hotmart AppSec] Migration of .appsec-state failed:`, err);
+		}
+	}
+}
+
+/**
+ * Removes the legacy `.kiro.hook` file from the user-level hooks directory (~/.kiro/hooks/).
+ * Previous versions (and MDM installs) placed this file there, but Kiro requires `.json` format.
+ */
+function cleanupLegacyGlobalKiroHook(): void {
+	if (detectIDE() !== 'kiro') { return; }
+
+	const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+	if (!homeDir) { return; }
+
+	const legacyHook = path.join(homeDir, '.kiro', 'hooks', 'appsec-gate.kiro.hook');
+	try {
+		if (fs.existsSync(legacyHook)) {
+			fs.unlinkSync(legacyHook);
+			console.log(`[Hotmart AppSec] Removed legacy global hook: ${legacyHook}`);
+		}
+	} catch (err) {
+		console.warn(`[Hotmart AppSec] Could not remove legacy global hook:`, err);
+	}
 }
 
 /**
@@ -395,16 +477,16 @@ function installKiroHookOnActivate(
 	force: boolean
 ): void {
 	const hooksDir = path.join(workspaceFolder, '.kiro', 'hooks');
-	const hookFile = path.join(hooksDir, 'appsec-gate.kiro.hook');
+	const hookFile = path.join(hooksDir, 'appsec-gate.json');
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.kiro.hook');
+	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.json');
 	if (!fs.existsSync(sourceFile)) {
 		console.error(`[Hotmart AppSec] missing kiro hook source: ${sourceFile}`);
 		return;
 	}
 
 	if (fs.existsSync(hookFile) && !force) {
-		// Clean up legacy file from previous versions of the extension
+		// Clean up legacy files from previous versions of the extension
 		cleanupLegacyKiroHook(hooksDir);
 		return;
 	}
@@ -419,18 +501,22 @@ function installKiroHookOnActivate(
 }
 
 /**
- * Removes the legacy `.json` Kiro hook left by older versions of this extension.
- * Kiro recognizes only `.kiro.hook` files, so the `.json` is dead weight.
+ * Removes legacy Kiro hook files left by older versions of this extension.
+ * Current format is `.json` (Kiro v2 schema). Old formats: `.kiro.hook`.
  */
 function cleanupLegacyKiroHook(hooksDir: string): void {
-	const legacy = path.join(hooksDir, 'appsec-gate.json');
-	try {
-		if (fs.existsSync(legacy)) {
-			fs.unlinkSync(legacy);
-			console.log(`[Hotmart AppSec] Removed legacy hook ${legacy}`);
+	const legacyFiles = [
+		path.join(hooksDir, 'appsec-gate.kiro.hook'),
+	];
+	for (const legacy of legacyFiles) {
+		try {
+			if (fs.existsSync(legacy)) {
+				fs.unlinkSync(legacy);
+				console.log(`[Hotmart AppSec] Removed legacy hook ${legacy}`);
+			}
+		} catch (err) {
+			console.warn(`[Hotmart AppSec] Could not remove legacy hook: ${err}`);
 		}
-	} catch (err) {
-		console.warn(`[Hotmart AppSec] Could not remove legacy hook: ${err}`);
 	}
 }
 
@@ -905,14 +991,14 @@ function normalizeRuleId(id: string): string {
 }
 
 /**
- * Persists a dismissed finding to .appsec-state/dismissed.json
+ * Persists a dismissed finding to .appsec/dismissed.json
  * so the pre-commit hook can skip it.
  */
 function persistDismissal(findingInfo: { id: string; file: string; line: number }): void {
 	const workspaceFolder = getWorkspaceFolder();
 	if (!workspaceFolder) { return; }
 
-	const stateDir = path.join(workspaceFolder, '.appsec-state');
+	const stateDir = path.join(workspaceFolder, '.appsec');
 	const dismissedFile = path.join(stateDir, 'dismissed.json');
 
 	if (!fs.existsSync(stateDir)) {
@@ -1262,7 +1348,6 @@ function ensureLinterIgnores(workspaceFolder: string): void {
 		'.cursor/rules/',
 		'.github/copilot-instructions.md',
 		'.appsec/',
-		'.appsec-state/',
 	];
 
 	const APPSEC_MARKER = '# AppSec protected paths (do not format)';
@@ -1381,7 +1466,7 @@ async function installCursorHook(context: vscode.ExtensionContext, workspaceFold
 
 async function installKiroHook(context: vscode.ExtensionContext, workspaceFolder: string): Promise<number> {
 	const hooksDir = path.join(workspaceFolder, '.kiro', 'hooks');
-	const hookFile = path.join(hooksDir, 'appsec-gate.kiro.hook');
+	const hookFile = path.join(hooksDir, 'appsec-gate.json');
 
 	// Don't overwrite if already exists
 	if (fs.existsSync(hookFile)) {
@@ -1389,7 +1474,7 @@ async function installKiroHook(context: vscode.ExtensionContext, workspaceFolder
 		return 0;
 	}
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.kiro.hook');
+	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.json');
 	if (!fs.existsSync(sourceFile)) {
 		return 0;
 	}

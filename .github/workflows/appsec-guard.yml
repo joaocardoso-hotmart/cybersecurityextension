@@ -14,12 +14,9 @@ jobs:
     runs-on: secops-app-sec
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Fetch base branch
-        run: git fetch origin "${{ github.base_ref }}"
 
       - name: "🛡️ Detect changes to AppSec steering files"
         id: detect
@@ -37,15 +34,23 @@ jobs:
             ".github/copilot-instructions.md"
           )
 
+          # Canonical signature that identifies content produced by the AppSec extension.
+          # If the PR version of a protected file contains this marker, it is a legitimate
+          # update pushed by the extension (e.g., version upgrade) and should be allowed.
+          # Additionally, if the new version is LARGER than the base version, it means
+          # rules were added (not weakened) — also allow.
           APPSEC_CANONICAL_MARKER="SECURITY CRITICAL RULES"
 
           CHANGED_FILES=""
           HAS_VIOLATION="false"
 
           for file in "${PROTECTED_FILES[@]}"; do
-            if git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -q "^${file}$"; then
-              if git show "origin/${{ github.base_ref }}:${file}" &>/dev/null; then
-                BASE_LINES=$(git show "origin/${{ github.base_ref }}:${file}" 2>/dev/null | wc -l | tr -d ' ')
+            if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${file}$"; then
+              # Check if the file is being ADDED (new) or MODIFIED (existing)
+              if git show origin/${{ github.base_ref }}:"${file}" &>/dev/null; then
+                # File exists in base branch → this is a MODIFICATION
+                # Strategy: allow if new content contains canonical marker OR is larger (rules added)
+                BASE_LINES=$(git show origin/${{ github.base_ref }}:"${file}" 2>/dev/null | wc -l | tr -d ' ')
                 PR_LINES=$(wc -l < "$file" 2>/dev/null | tr -d ' ' || echo "0")
 
                 if [ -f "$file" ] && grep -q "$APPSEC_CANONICAL_MARKER" "$file"; then
@@ -53,11 +58,13 @@ jobs:
                 elif [ "$PR_LINES" -ge "$BASE_LINES" ] && [ "$PR_LINES" -gt 10 ]; then
                   echo "  ℹ️  ${file} grew from ${BASE_LINES} to ${PR_LINES} lines (rules added) — allowed"
                 else
+                  # Content was weakened (smaller or missing marker) — block
                   HAS_VIOLATION="true"
                   CHANGED_FILES="${CHANGED_FILES}${file}\n"
                   echo "  ⚠️  ${file} was REDUCED from ${BASE_LINES} to ${PR_LINES} lines — BLOCKED"
                 fi
               else
+                # File does NOT exist in base branch → this is a CREATION → allow
                 echo "  ℹ️  ${file} is being created (first time) — allowed"
               fi
             fi
@@ -89,7 +96,7 @@ jobs:
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 echo "📄 File: $f"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                git diff "origin/${{ github.base_ref }}...HEAD" -- "$f" || true
+                git diff origin/${{ github.base_ref }}...HEAD -- "$f" || true
                 echo ""
               fi
             done
@@ -149,7 +156,7 @@ jobs:
             for (const file of protectedFiles) {
               try {
                 const diff = execSync(
-                  `git diff "origin/${baseBranch}...HEAD" -- "${file}"`,
+                  `git diff origin/${baseBranch}...HEAD -- "${file}"`,
                   { encoding: 'utf-8' }
                 ).trim();
                 if (diff) {
@@ -175,12 +182,9 @@ jobs:
     runs-on: secops-app-sec
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Fetch base branch
-        run: git fetch origin "${{ github.base_ref }}"
 
       - name: "🪝 Verify pre-commit hook integrity"
         id: hook-check
@@ -195,25 +199,42 @@ jobs:
           HAS_ISSUE="false"
           ISSUE_TYPE=""
 
+          # First check: does the hook file exist in the base branch?
+          EXISTED_IN_BASE="false"
+          if git show origin/${{ github.base_ref }}:"${HOOK_FILE}" &>/dev/null; then
+            EXISTED_IN_BASE="true"
+          fi
+
+          # Check if hook file exists in the PR branch
           if [ ! -f "$HOOK_FILE" ]; then
-            HAS_ISSUE="true"
-            ISSUE_TYPE="deleted"
-            echo "  ❌ Hook file not found: $HOOK_FILE"
+            if [ "$EXISTED_IN_BASE" = "true" ]; then
+              # File existed in base but was DELETED in this PR → violation
+              HAS_ISSUE="true"
+              ISSUE_TYPE="deleted"
+              echo "  ❌ Hook file was deleted: $HOOK_FILE"
+            else
+              # File never existed (repo not yet bootstrapped) → skip silently
+              echo "  ℹ️  Hook file not present yet (repo not bootstrapped) — skipping"
+            fi
           else
-            if git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -q "^${HOOK_FILE}$"; then
-              if git show "origin/${{ github.base_ref }}:${HOOK_FILE}" &>/dev/null; then
+            # Hook file exists in PR branch — check for modifications
+            if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${HOOK_FILE}$"; then
+              if [ "$EXISTED_IN_BASE" = "true" ]; then
+                # File exists in base branch → this is a MODIFICATION → block
                 HAS_ISSUE="true"
                 ISSUE_TYPE="modified"
                 echo "  ⚠️  Hook file was modified in this PR"
                 echo ""
                 echo "  Changes:"
-                git diff "origin/${{ github.base_ref }}...HEAD" -- "$HOOK_FILE" || true
+                git diff origin/${{ github.base_ref }}...HEAD -- "$HOOK_FILE" || true
               else
+                # File does NOT exist in base branch → this is a CREATION → allow
                 echo "  ℹ️  Hook file is being created (first time) — allowed"
               fi
             fi
 
-            if git show "origin/${{ github.base_ref }}:${HOOK_FILE}" &>/dev/null; then
+            # Check if hook is executable (only if file already existed in base branch)
+            if [ "$EXISTED_IN_BASE" = "true" ]; then
               if [ ! -x "$HOOK_FILE" ]; then
                 HAS_ISSUE="true"
                 ISSUE_TYPE="disabled"
@@ -222,8 +243,10 @@ jobs:
             fi
           fi
 
+          # Also check if .appsec/dismissed.json was tampered
           DISMISSED_FILE=".appsec/dismissed.json"
-          if git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -q "^${DISMISSED_FILE}$"; then
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q "^${DISMISSED_FILE}$"; then
+            # Check if ALL findings were dismissed (suspicious bulk dismiss)
             if [ -f "$DISMISSED_FILE" ]; then
               DISMISSED_COUNT=$(python3 -c "import json; d=json.load(open('$DISMISSED_FILE')); print(len(d))" 2>/dev/null || echo "0")
               if [ "$DISMISSED_COUNT" -gt 20 ]; then
@@ -320,16 +343,12 @@ jobs:
     runs-on: secops-app-sec
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Fetch base branch
-        run: git fetch origin "${{ github.base_ref }}"
-
       - name: Install OpenGrep
         run: |
-          mkdir -p "$HOME/.local/bin"
           curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
@@ -344,7 +363,7 @@ jobs:
             exit 0
           fi
 
-          CHANGED_FILES=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -iE '\.(ts|tsx|js|jsx|mjs|cjs|java|kt|kts|py|pyi|go|rb|php|c|h|cpp|cs|swift|rs|scala)$' || true)
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -iE '\.(ts|tsx|js|jsx|mjs|cjs|java|kt|kts|py|pyi|go|rb|php|c|h|cpp|cs|swift|rs|scala)$' || true)
 
           if [ -z "$CHANGED_FILES" ]; then
             echo "No code files changed."
@@ -442,27 +461,25 @@ jobs:
               table += `| ${icon} ${sev} | ${rule} | \`${file}\` | L${line} |\n`;
             }
 
-            const body = [
-              '## 🔍 SAST Scan — ' + total + ' Vulnerabilidade(s) Detectada(s)',
-              '',
-              '> **⛔ OpenGrep encontrou problemas de segurança nos arquivos alterados.**',
-              '',
-              summary.join(' · '),
-              '',
-              '### Findings',
-              '',
-              table,
-              '',
-              '---',
-              '',
-              '### Como resolver:',
-              '1. **Corrija** as vulnerabilidades identificadas acima',
-              '2. Se um finding é **falso positivo**, marque na extensão da IDE e faça commit do `.appsec/dismissed.json`',
-              '3. Push na branch corrigida',
-              '',
-              '---',
-              '*🤖 Scan automático pelo AppSec (OpenGrep)*'
-            ].join('\n');
+            const body = `## 🔍 SAST Scan — ${total} Vulnerabilidade(s) Detectada(s)
+
+            > **⛔ OpenGrep encontrou problemas de segurança nos arquivos alterados.**
+
+            ${summary.join(' · ')}
+
+            ### Findings
+
+            ${table}
+
+            ---
+
+            ### Como resolver:
+            1. **Corrija** as vulnerabilidades identificadas acima
+            2. Se um finding é **falso positivo**, marque na extensão da IDE e faça commit do \`.appsec-state/dismissed.json\`
+            3. Push na branch corrigida
+
+            ---
+            *🤖 Scan automático pelo AppSec (OpenGrep)*`.replace(/            /g, '');
 
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
