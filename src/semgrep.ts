@@ -66,6 +66,51 @@ export async function installOpenGrep(): Promise<boolean> {
 			cancellable: false,
 		},
 		async (progress) => {
+			if (process.platform === 'win32') {
+				// Windows installation strategies
+				// 1. Try winget (available on Windows 10 1709+ and Windows 11)
+				try {
+					progress.report({ message: 'Tentando via winget...' });
+					await execFileAsync('winget', ['install', '--id', 'OpenGrep.OpenGrep', '-e', '--accept-source-agreements', '--accept-package-agreements'], {
+						encoding: 'utf-8',
+						timeout: 120000,
+					});
+					return true;
+				} catch { /* winget not available or package not found */ }
+
+				// 2. Try scoop (popular on dev machines)
+				try {
+					progress.report({ message: 'Tentando via scoop...' });
+					await execFileAsync('scoop', ['install', 'opengrep'], {
+						encoding: 'utf-8',
+						timeout: 120000,
+					});
+					return true;
+				} catch { /* scoop not available */ }
+
+				// 3. Try pip as fallback (Python is often available on Windows dev machines)
+				try {
+					progress.report({ message: 'Tentando via pip...' });
+					await execFileAsync('pip', ['install', 'opengrep'], {
+						encoding: 'utf-8',
+						timeout: 120000,
+					});
+					return true;
+				} catch { /* */ }
+
+				// 4. Try pip3 as last resort
+				try {
+					progress.report({ message: 'Tentando via pip3...' });
+					await execFileAsync('pip3', ['install', 'opengrep'], {
+						encoding: 'utf-8',
+						timeout: 120000,
+					});
+					return true;
+				} catch { /* */ }
+
+				return false;
+			}
+
 			// macOS / Linux: use the official install script
 			try {
 				progress.report({ message: 'Baixando binário...' });
@@ -75,7 +120,7 @@ export async function installOpenGrep(): Promise<boolean> {
 				});
 				return true;
 			} catch {
-				// Try brew as fallback
+				// Try brew as fallback (macOS)
 				try {
 					progress.report({ message: 'Tentando via brew...' });
 					await execFileAsync('brew', ['install', 'opengrep/tap/opengrep'], {
@@ -106,8 +151,13 @@ export async function installOpenGrep(): Promise<boolean> {
 		return true;
 	}
 
+	// Platform-specific failure message
+	const installHint = process.platform === 'win32'
+		? 'Instale manualmente via: winget install OpenGrep.OpenGrep ou pip install opengrep'
+		: 'Instale manualmente via: brew install opengrep/tap/opengrep ou pip3 install opengrep';
+
 	const action = await vscode.window.showErrorMessage(
-		'[Hotmart AppSec] Não conseguimos instalar o OpenGrep automaticamente. Sem ele, o scan de segurança não funciona.',
+		`[Hotmart AppSec] Não conseguimos instalar o OpenGrep automaticamente. ${installHint}`,
 		'Ver Instruções'
 	);
 

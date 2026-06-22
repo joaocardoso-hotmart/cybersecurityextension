@@ -35,6 +35,34 @@ const CLAUDE_FILES = {
 };
 
 /**
+ * Returns true when running on Windows.
+ */
+function isWindows(): boolean {
+	return process.platform === 'win32';
+}
+
+/**
+ * Returns the gate script command appropriate for the current OS.
+ * On Windows uses PowerShell with -ExecutionPolicy Bypass; on macOS/Linux uses bash.
+ */
+function gateCommand(scriptRelativePath: string): string {
+	if (isWindows()) {
+		// Use -NoProfile to skip user profile scripts and -ExecutionPolicy Bypass
+		// to ensure the script runs even in locked-down corporate environments.
+		const ps1Path = scriptRelativePath.replace(/\.sh$/, '.ps1');
+		return `powershell -NoProfile -ExecutionPolicy Bypass -File "${ps1Path}"`;
+	}
+	return `bash ${scriptRelativePath}`;
+}
+
+/**
+ * Returns the file extension for gate scripts on the current platform.
+ */
+function gateScriptExtension(): string {
+	return isWindows() ? '.ps1' : '.sh';
+}
+
+/**
  * Detects which IDE is running based on vscode.env.uriScheme.
  */
 function detectIDE(): string {
@@ -138,8 +166,10 @@ export function activate(context: vscode.ExtensionContext) {
 	// Migrate legacy .appsec-state/ folder into .appsec/ (consolidation in v0.9+)
 	if (force) {
 		migrateLegacyAppsecState();
-		cleanupLegacyGlobalKiroHook();
 	}
+
+	// Always clean up legacy hooks that cause performance issues (runs fast, no-op if absent)
+	cleanupLegacyGlobalKiroHook();
 
 	// Fix global steering file if it exists but is missing description (legacy MDM installs)
 	ensureGlobalSteeringFile(context);
@@ -160,6 +190,10 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.window.showInformationMessage(
 			'[Hotmart AppSec] 🛡️ Extensão instalada com sucesso! Os hooks de segurança corporativa foram configurados nos seus workspaces. Estamos aqui pra te ajudar a manter o código seguro. 💪'
 		);
+		// On Windows, alert the user about PowerShell execution policy
+		if (isWindows()) {
+			notifyWindowsExecutionPolicy();
+		}
 	} else if (installState === 'update') {
 		vscode.window.showInformationMessage(
 			'[Hotmart AppSec] 🛡️ Extensão atualizada! Hooks e padrões de segurança corporativa sincronizados. Tudo certo por aqui. ✨'
@@ -204,6 +238,38 @@ function detectInstallOrUpdate(context: vscode.ExtensionContext): 'install' | 'u
 	}
 
 	return 'none';
+}
+
+/**
+ * Notifies Windows users about the PowerShell execution policy requirement.
+ * The extension's security hooks use PowerShell scripts (.ps1). On corporate machines
+ * the default execution policy may block these scripts. This notification guides the
+ * user to allow execution or provides the command to fix it.
+ */
+function notifyWindowsExecutionPolicy(): void {
+	const STATE_KEY = 'hotmartAppSec.winPolicyNotified';
+
+	// Only show once per machine (persisted in globalState)
+	if (_extensionContext.globalState.get<boolean>(STATE_KEY)) { return; }
+
+	void _extensionContext.globalState.update(STATE_KEY, true);
+
+	const message =
+		'[Hotmart AppSec] 🛡️ Windows detectado! Os hooks de segurança usam scripts PowerShell (.ps1). ' +
+		'Se o Windows solicitar permissão para executar, por favor aprove — é a ferramenta de segurança ' +
+		'corporativa protegendo seu código contra vazamento de credenciais e padrões inseguros. ' +
+		'Caso os scripts sejam bloqueados, execute no PowerShell (Admin): ' +
+		'Set-ExecutionPolicy RemoteSigned -Scope CurrentUser';
+
+	vscode.window.showWarningMessage(message, 'Copiar Comando', 'Entendi').then(action => {
+		if (action === 'Copiar Comando') {
+			vscode.env.clipboard.writeText('Set-ExecutionPolicy RemoteSigned -Scope CurrentUser');
+			vscode.window.showInformationMessage(
+				'[Hotmart AppSec] Comando copiado! Cole no PowerShell como Administrador e pressione Enter. ' +
+				'Isso permite a execução de scripts locais assinados e é seguro para uso corporativo.'
+			);
+		}
+	});
 }
 
 /**
@@ -466,9 +532,9 @@ function ensureSecurityHookForWorkspace(
 }
 
 /**
- * Copies the shared `appsec-gate.sh` script to `.appsec/appsec-gate.sh`.
- * Used by Claude Code (PreToolUse), Cursor (beforeSubmitPrompt/afterFileEdit)
- * and the git pre-commit hook.
+ * Copies the shared gate script to `.appsec/`.
+ * On Windows installs appsec-gate.ps1; on macOS/Linux installs appsec-gate.sh.
+ * Both versions are always installed so cross-platform repos work for all devs.
  */
 function installAppsecGateScript(
 	context: vscode.ExtensionContext,
@@ -476,18 +542,29 @@ function installAppsecGateScript(
 	force: boolean
 ): void {
 	const appsecDir = path.join(workspaceFolder, '.appsec');
-	const scriptDest = path.join(appsecDir, 'appsec-gate.sh');
-	const scriptSource = path.join(context.extensionPath, 'standards', 'hooks', 'appsec-gate.sh');
-
-	if (!fs.existsSync(scriptSource)) { return; }
-	if (fs.existsSync(scriptDest) && !force) { return; }
 
 	if (!fs.existsSync(appsecDir)) {
 		fs.mkdirSync(appsecDir, { recursive: true });
 	}
-	fs.copyFileSync(scriptSource, scriptDest);
-	try { fs.chmodSync(scriptDest, 0o755); } catch { /* not fatal on Windows */ }
-	console.log(`[Hotmart AppSec] Gate script installed/updated at ${scriptDest}`);
+
+	// Install both .sh and .ps1 so the repo works for devs on any OS
+	const scripts = [
+		{ src: 'appsec-gate.sh', dest: 'appsec-gate.sh' },
+		{ src: 'appsec-gate.ps1', dest: 'appsec-gate.ps1' },
+	];
+
+	for (const { src, dest } of scripts) {
+		const scriptSource = path.join(context.extensionPath, 'standards', 'hooks', src);
+		const scriptDest = path.join(appsecDir, dest);
+
+		if (!fs.existsSync(scriptSource)) { continue; }
+		if (fs.existsSync(scriptDest) && !force) { continue; }
+
+		fs.copyFileSync(scriptSource, scriptDest);
+		// chmod is no-op on Windows but needed for macOS/Linux
+		try { fs.chmodSync(scriptDest, 0o755); } catch { /* not fatal on Windows */ }
+		console.log(`[Hotmart AppSec] Gate script installed/updated at ${scriptDest}`);
+	}
 }
 
 function installKiroHookOnActivate(
@@ -497,12 +574,6 @@ function installKiroHookOnActivate(
 ): void {
 	const hooksDir = path.join(workspaceFolder, '.kiro', 'hooks');
 	const hookFile = path.join(hooksDir, 'appsec-gate.json');
-
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.json');
-	if (!fs.existsSync(sourceFile)) {
-		console.error(`[Hotmart AppSec] missing kiro hook source: ${sourceFile}`);
-		return;
-	}
 
 	if (fs.existsSync(hookFile) && !force) {
 		// Clean up legacy files from previous versions of the extension
@@ -514,7 +585,41 @@ function installKiroHookOnActivate(
 		fs.mkdirSync(hooksDir, { recursive: true });
 	}
 
-	fs.copyFileSync(sourceFile, hookFile);
+	// Generate hook JSON with platform-appropriate command
+	const hookContent = {
+		version: 'v1',
+		hooks: [
+			{
+				name: 'AppSec Gate \u2014 Write Operations',
+				trigger: 'PreToolUse',
+				matcher: 'fs_write|str_replace|fs_append',
+				action: {
+					type: 'command',
+					command: gateCommand('.appsec/appsec-gate-kiro' + gateScriptExtension()),
+				},
+			},
+		],
+	};
+	fs.writeFileSync(hookFile, JSON.stringify(hookContent, null, 2), 'utf-8');
+
+	// Install the platform-specific gate script used by the hook
+	const appsecDir = path.join(workspaceFolder, '.appsec');
+	if (!fs.existsSync(appsecDir)) { fs.mkdirSync(appsecDir, { recursive: true }); }
+
+	// Install both .sh and .ps1 so the repo works cross-platform
+	const kiroScripts = [
+		{ src: path.join('kiro', 'appsec-gate-kiro.sh'), dest: 'appsec-gate-kiro.sh' },
+		{ src: path.join('kiro', 'appsec-gate-kiro.ps1'), dest: 'appsec-gate-kiro.ps1' },
+	];
+
+	for (const { src, dest } of kiroScripts) {
+		const source = path.join(context.extensionPath, 'standards', 'hooks', src);
+		const destPath = path.join(appsecDir, dest);
+		if (!fs.existsSync(source)) { continue; }
+		fs.copyFileSync(source, destPath);
+		try { fs.chmodSync(destPath, 0o755); } catch { /* not fatal on Windows */ }
+	}
+
 	cleanupLegacyKiroHook(hooksDir);
 	console.log(`[Hotmart AppSec] Kiro hook installed/updated at ${hookFile}`);
 }
@@ -548,14 +653,29 @@ function installClaudeHookOnActivate(
 	const claudeDir = path.join(workspaceFolder, '.claude');
 	const settingsFile = path.join(claudeDir, 'settings.json');
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'claude', 'settings.json');
-	if (!fs.existsSync(sourceFile)) { return; }
 	if (fs.existsSync(settingsFile) && !force) { return; }
 
 	if (!fs.existsSync(claudeDir)) {
 		fs.mkdirSync(claudeDir, { recursive: true });
 	}
-	fs.copyFileSync(sourceFile, settingsFile);
+
+	// Generate settings with platform-appropriate command
+	const settings = {
+		hooks: {
+			PreToolUse: [
+				{
+					matcher: 'Write|Edit|MultiEdit|CreateFile',
+					hooks: [
+						{
+							type: 'command',
+							command: gateCommand('.appsec/appsec-gate' + gateScriptExtension()),
+						},
+					],
+				},
+			],
+		},
+	};
+	fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
 	console.log(`[Hotmart AppSec] Claude Code hook installed/updated at ${settingsFile}`);
 }
 
@@ -568,17 +688,21 @@ function installCursorHookOnActivate(
 	const cursorDir = path.join(workspaceFolder, '.cursor');
 	const hooksFile = path.join(cursorDir, 'hooks.json');
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'cursor', 'hooks.json');
-	if (!fs.existsSync(sourceFile)) {
-		console.error(`[Hotmart AppSec] missing cursor hook source: ${sourceFile}`);
-		return;
-	}
 	if (fs.existsSync(hooksFile) && !force) { return; }
 
 	if (!fs.existsSync(cursorDir)) {
 		fs.mkdirSync(cursorDir, { recursive: true });
 	}
-	fs.copyFileSync(sourceFile, hooksFile);
+
+	// Generate hooks with platform-appropriate command
+	const cmd = gateCommand('.appsec/appsec-gate' + gateScriptExtension());
+	const hooks = {
+		hooks: {
+			beforeSubmitPrompt: { command: cmd },
+			afterFileEdit: { command: cmd },
+		},
+	};
+	fs.writeFileSync(hooksFile, JSON.stringify(hooks, null, 2), 'utf-8');
 	console.log(`[Hotmart AppSec] Cursor hook installed/updated at ${hooksFile}`);
 }
 
@@ -596,17 +720,52 @@ function installGitPreCommitHook(context: vscode.ExtensionContext, workspaceFold
 		return;
 	}
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'pre-commit');
-	if (!fs.existsSync(sourceFile)) {
-		return;
-	}
-
 	if (!fs.existsSync(gitHooksDir)) {
 		fs.mkdirSync(gitHooksDir, { recursive: true });
 	}
 
-	fs.copyFileSync(sourceFile, preCommitFile);
-	fs.chmodSync(preCommitFile, 0o755);
+	if (isWindows()) {
+		// On Windows, Git for Windows runs hooks via its bundled bash (sh.exe).
+		// However, we write a polyglot script that tries PowerShell first,
+		// falling back to bash if available.
+		const preCommitContent = `#!/bin/sh
+# AppSec pre-commit hook (cross-platform)
+# Checks staged content for insecure patterns before allowing commit.
+
+# Try PowerShell first (Windows native)
+if command -v powershell.exe >/dev/null 2>&1; then
+  git diff --cached --diff-filter=ACM -p | powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".appsec/appsec-gate.ps1"
+  exit $?
+fi
+
+# Fallback to bash gate
+if [ -f ".appsec/appsec-gate.sh" ]; then
+  git diff --cached --diff-filter=ACM -p | bash .appsec/appsec-gate.sh
+  exit $?
+fi
+
+exit 0
+`;
+		fs.writeFileSync(preCommitFile, preCommitContent, 'utf-8');
+	} else {
+		// macOS/Linux: use bundled pre-commit if available, otherwise generate one
+		const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'pre-commit');
+		if (fs.existsSync(sourceFile)) {
+			fs.copyFileSync(sourceFile, preCommitFile);
+		} else {
+			const preCommitContent = `#!/bin/sh
+# AppSec pre-commit hook
+if [ -f ".appsec/appsec-gate.sh" ]; then
+  git diff --cached --diff-filter=ACM -p | bash .appsec/appsec-gate.sh
+  exit $?
+fi
+exit 0
+`;
+			fs.writeFileSync(preCommitFile, preCommitContent, 'utf-8');
+		}
+	}
+
+	try { fs.chmodSync(preCommitFile, 0o755); } catch { /* Windows */ }
 	console.log('[Hotmart AppSec] Git pre-commit hook installed');
 }
 
@@ -1471,18 +1630,26 @@ async function installGateScriptManual(
 	workspaceFolder: string
 ): Promise<number> {
 	const appsecDir = path.join(workspaceFolder, '.appsec');
-	const scriptDest = path.join(appsecDir, 'appsec-gate.sh');
-	if (fs.existsSync(scriptDest)) { return 0; }
+	let installed = 0;
 
-	const scriptSource = path.join(context.extensionPath, 'standards', 'hooks', 'appsec-gate.sh');
-	if (!fs.existsSync(scriptSource)) { return 0; }
+	// Install both .sh and .ps1 so the repo is cross-platform
+	const scripts = ['appsec-gate.sh', 'appsec-gate.ps1'];
+	for (const scriptName of scripts) {
+		const scriptDest = path.join(appsecDir, scriptName);
+		if (fs.existsSync(scriptDest)) { continue; }
 
-	if (!fs.existsSync(appsecDir)) {
-		fs.mkdirSync(appsecDir, { recursive: true });
+		const scriptSource = path.join(context.extensionPath, 'standards', 'hooks', scriptName);
+		if (!fs.existsSync(scriptSource)) { continue; }
+
+		if (!fs.existsSync(appsecDir)) {
+			fs.mkdirSync(appsecDir, { recursive: true });
+		}
+		fs.copyFileSync(scriptSource, scriptDest);
+		try { fs.chmodSync(scriptDest, 0o755); } catch { /* Windows */ }
+		installed++;
 	}
-	fs.copyFileSync(scriptSource, scriptDest);
-	try { fs.chmodSync(scriptDest, 0o755); } catch { /* not fatal on Windows */ }
-	return 1;
+
+	return installed > 0 ? 1 : 0;
 }
 
 async function installCursorHook(context: vscode.ExtensionContext, workspaceFolder: string): Promise<number> {
@@ -1490,13 +1657,18 @@ async function installCursorHook(context: vscode.ExtensionContext, workspaceFold
 	const hooksFile = path.join(cursorDir, 'hooks.json');
 	if (fs.existsSync(hooksFile)) { return 0; }
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'cursor', 'hooks.json');
-	if (!fs.existsSync(sourceFile)) { return 0; }
-
 	if (!fs.existsSync(cursorDir)) {
 		fs.mkdirSync(cursorDir, { recursive: true });
 	}
-	fs.copyFileSync(sourceFile, hooksFile);
+
+	const cmd = gateCommand('.appsec/appsec-gate' + gateScriptExtension());
+	const hooks = {
+		hooks: {
+			beforeSubmitPrompt: { command: cmd },
+			afterFileEdit: { command: cmd },
+		},
+	};
+	fs.writeFileSync(hooksFile, JSON.stringify(hooks, null, 2), 'utf-8');
 	return 1;
 }
 
@@ -1510,16 +1682,26 @@ async function installKiroHook(context: vscode.ExtensionContext, workspaceFolder
 		return 0;
 	}
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'kiro', 'appsec-gate.json');
-	if (!fs.existsSync(sourceFile)) {
-		return 0;
-	}
-
 	if (!fs.existsSync(hooksDir)) {
 		fs.mkdirSync(hooksDir, { recursive: true });
 	}
 
-	fs.copyFileSync(sourceFile, hookFile);
+	// Generate hook JSON with platform-appropriate command
+	const hookContent = {
+		version: 'v1',
+		hooks: [
+			{
+				name: 'AppSec Gate \u2014 Write Operations',
+				trigger: 'PreToolUse',
+				matcher: 'fs_write|str_replace|fs_append',
+				action: {
+					type: 'command',
+					command: gateCommand('.appsec/appsec-gate-kiro' + gateScriptExtension()),
+				},
+			},
+		],
+	};
+	fs.writeFileSync(hookFile, JSON.stringify(hookContent, null, 2), 'utf-8');
 	cleanupLegacyKiroHook(hooksDir);
 	return 1;
 }
@@ -1529,13 +1711,27 @@ async function installClaudeHook(context: vscode.ExtensionContext, workspaceFold
 	const settingsFile = path.join(claudeSettingsDir, 'settings.json');
 	if (fs.existsSync(settingsFile)) { return 0; }
 
-	const sourceFile = path.join(context.extensionPath, 'standards', 'hooks', 'claude', 'settings.json');
-	if (!fs.existsSync(sourceFile)) { return 0; }
-
 	if (!fs.existsSync(claudeSettingsDir)) {
 		fs.mkdirSync(claudeSettingsDir, { recursive: true });
 	}
-	fs.copyFileSync(sourceFile, settingsFile);
+
+	// Generate settings with platform-appropriate command
+	const settings = {
+		hooks: {
+			PreToolUse: [
+				{
+					matcher: 'Write|Edit|MultiEdit|CreateFile',
+					hooks: [
+						{
+							type: 'command',
+							command: gateCommand('.appsec/appsec-gate' + gateScriptExtension()),
+						},
+					],
+				},
+			],
+		},
+	};
+	fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), 'utf-8');
 	return 1;
 }
 
