@@ -10,11 +10,8 @@ permissions:
 
 jobs:
   appsec-guard:
-    name: "🔒 Security Rules Integrity"
+    name: "🛡️ AppSec Security Check"
     runs-on: secops-app-sec
-    outputs:
-      has_violation: ${{ steps.detect.outputs.has_violation }}
-      changed_files: ${{ steps.detect.outputs.changed_files }}
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
@@ -24,8 +21,12 @@ jobs:
       - name: Fetch base branch
         run: git fetch origin "${{ github.base_ref }}"
 
-      - name: "🛡️ Detect changes to AppSec steering files"
+      # ═══════════════════════════════════════════════════════════════════════
+      # CHECK 1: Security Rules Integrity
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: "🔒 Detect changes to AppSec steering files"
         id: detect
+        continue-on-error: true
         run: |
           PROTECTED_FILES=(
             ".kiro/steering/appsec-rules.md"
@@ -66,23 +67,12 @@ jobs:
             exit 1
           fi
 
-  hook-integrity:
-    name: "🪝 Hook Integrity"
-    runs-on: secops-app-sec
-    outputs:
-      has_issue: ${{ steps.hook-check.outputs.has_issue }}
-      issue_type: ${{ steps.hook-check.outputs.issue_type }}
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
-        with:
-          fetch-depth: 0
-
-      - name: Fetch base branch
-        run: git fetch origin "${{ github.base_ref }}"
-
+      # ═══════════════════════════════════════════════════════════════════════
+      # CHECK 2: Hook Integrity
+      # ═══════════════════════════════════════════════════════════════════════
       - name: "🪝 Verify pre-commit hook integrity"
         id: hook-check
+        continue-on-error: true
         run: |
           HOOK_FILE=".appsec/appsec-gate.sh"
           HAS_ISSUE="false"
@@ -112,21 +102,9 @@ jobs:
             exit 1
           fi
 
-  sast-scan:
-    name: "🔍 SAST Scan"
-    runs-on: secops-app-sec
-    outputs:
-      has_findings: ${{ steps.scan.outputs.has_findings }}
-      findings_summary: ${{ steps.scan.outputs.findings_summary }}
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
-        with:
-          fetch-depth: 0
-
-      - name: Fetch base branch
-        run: git fetch origin "${{ github.base_ref }}"
-
+      # ═══════════════════════════════════════════════════════════════════════
+      # CHECK 3: SAST Scan
+      # ═══════════════════════════════════════════════════════════════════════
       - name: Install OpenGrep
         run: |
           mkdir -p "$HOME/.local/bin"
@@ -135,6 +113,7 @@ jobs:
 
       - name: "🔍 Run SAST scan on changed files"
         id: scan
+        continue-on-error: true
         run: |
           RULES_FILE="rules/security.yml"
           DISMISSED_FILE=".appsec/dismissed.json"
@@ -203,7 +182,7 @@ jobs:
                   gh.write('has_findings=false\n')
               sys.exit(0)
 
-          # Save findings for the report job
+          # Save findings for the report step
           with open('sast-findings.json', 'w') as f:
               json.dump(results, f)
 
@@ -217,39 +196,11 @@ jobs:
           sys.exit(1 if errors > 0 else 0)
           EOF
 
-      - name: Upload SAST findings
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sast-findings
-          path: sast-findings.json
-          retention-days: 1
-
-  # ═══════════════════════════════════════════════════════════════════════════════
-  # SINGLE UNIFIED PR COMMENT — consolidates all 3 checks into one clean report
-  # ═══════════════════════════════════════════════════════════════════════════════
-  report:
-    name: "📋 Security Report"
-    runs-on: secops-app-sec
-    needs: [appsec-guard, hook-integrity, sast-scan]
-    if: always() && (needs.appsec-guard.result == 'failure' || needs.hook-integrity.result == 'failure' || needs.sast-scan.result == 'failure')
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@11bd71901bbe5b525c5a8446c685325700831b63 # v4.2.2
-        with:
-          fetch-depth: 0
-
-      - name: Fetch base branch
-        run: git fetch origin "${{ github.base_ref }}"
-
-      - name: Download SAST findings
-        if: needs.sast-scan.result == 'failure'
-        uses: actions/download-artifact@v4
-        with:
-          name: sast-findings
-        continue-on-error: true
-
+      # ═══════════════════════════════════════════════════════════════════════
+      # REPORT: Unified PR Comment
+      # ═══════════════════════════════════════════════════════════════════════
       - name: "💬 Post unified security report"
+        if: always() && (steps.detect.outcome == 'failure' || steps.hook-check.outcome == 'failure' || steps.scan.outcome == 'failure')
         uses: actions/github-script@v7.0.1
         with:
           script: |
@@ -257,9 +208,9 @@ jobs:
             const { execSync } = require('child_process');
             const baseBranch = context.payload.pull_request.base.ref;
 
-            const guardFailed = '${{ needs.appsec-guard.result }}' === 'failure';
-            const hookFailed = '${{ needs.hook-integrity.result }}' === 'failure';
-            const sastFailed = '${{ needs.sast-scan.result }}' === 'failure';
+            const guardFailed = '${{ steps.detect.outcome }}' === 'failure';
+            const hookFailed = '${{ steps.hook-check.outcome }}' === 'failure';
+            const sastFailed = '${{ steps.scan.outcome }}' === 'failure';
 
             const sections = [];
 
@@ -276,7 +227,7 @@ jobs:
 
             // ─── Section 1: Steering file violations ──────────────────────
             if (guardFailed) {
-              const changedFiles = '${{ needs.appsec-guard.outputs.changed_files }}'.split(',').filter(Boolean);
+              const changedFiles = '${{ steps.detect.outputs.changed_files }}'.split(',').filter(Boolean);
 
               sections.push(`---`);
               sections.push('');
@@ -304,7 +255,7 @@ jobs:
 
             // ─── Section 2: Hook integrity ────────────────────────────────
             if (hookFailed) {
-              const issueType = '${{ needs.hook-integrity.outputs.issue_type }}';
+              const issueType = '${{ steps.hook-check.outputs.issue_type }}';
               const hookFile = '.appsec/appsec-gate.sh';
 
               sections.push(`---`);
@@ -406,3 +357,15 @@ jobs:
               repo: context.repo.repo,
               body: body
             });
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # FINAL GATE: Fail the job if any check detected issues
+      # ═══════════════════════════════════════════════════════════════════════
+      - name: "🚫 Fail if security issues detected"
+        if: always() && (steps.detect.outcome == 'failure' || steps.hook-check.outcome == 'failure' || steps.scan.outcome == 'failure')
+        run: |
+          echo "❌ Security checks failed:"
+          [ "${{ steps.detect.outcome }}" = "failure" ] && echo "  - Security Rules Integrity"
+          [ "${{ steps.hook-check.outcome }}" = "failure" ] && echo "  - Pre-Commit Hook Integrity"
+          [ "${{ steps.scan.outcome }}" = "failure" ] && echo "  - SAST Scan"
+          exit 1

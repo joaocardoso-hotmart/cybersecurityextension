@@ -419,7 +419,41 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 	// Deduplicate findings with same CWE on the same file:line
 	const deduped = deduplicateFindings(findings);
 
-	return sortBySeverity(deduped);
+	// Filter out dismissed/fixed findings
+	const filtered = filterDismissedFindings(deduped, workspaceFolder);
+
+	return sortBySeverity(filtered);
+}
+
+/**
+ * Reads .appsec/dismissed.json and removes findings that were dismissed or marked as fixed.
+ */
+function filterDismissedFindings(findings: SecurityFinding[], workspaceFolder: string): SecurityFinding[] {
+	const dismissedFile = path.join(workspaceFolder, '.appsec', 'dismissed.json');
+	if (!fs.existsSync(dismissedFile)) { return findings; }
+
+	let dismissed: Array<{ id: string; file: string; line: number }> = [];
+	try {
+		dismissed = JSON.parse(fs.readFileSync(dismissedFile, 'utf-8'));
+	} catch {
+		return findings;
+	}
+
+	if (dismissed.length === 0) { return findings; }
+
+	const dismissedKeys = new Set<string>();
+	for (const d of dismissed) {
+		const ruleId = normalizeCheckId(d.id);
+		// Match by rule+file+line (exact) and rule+file (any line)
+		dismissedKeys.add(`${ruleId}:${d.file}:${d.line}`);
+		dismissedKeys.add(`${ruleId}:${d.file}:0`);
+	}
+
+	return findings.filter(f => {
+		const key = `${f.id}:${f.file}:${f.line}`;
+		const keyAnyLine = `${f.id}:${f.file}:0`;
+		return !dismissedKeys.has(key) && !dismissedKeys.has(keyAnyLine);
+	});
 }
 
 /**

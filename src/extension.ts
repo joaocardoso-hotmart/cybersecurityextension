@@ -56,7 +56,7 @@ function hasCodeFiles(workspaceFolder: string): boolean {
 				return true;
 			}
 			if (entry.isDirectory() && !SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-				const child = path.normalize(path.join(dir, entry.name));
+				const child = path.resolve(dir, entry.name);
 				if (!child.startsWith(workspaceFolder + path.sep)) { continue; }
 				if (scanDir(child, depth + 1)) {
 					return true;
@@ -955,7 +955,37 @@ RULES_FILE=""
 [ -f "$GIT_ROOT/rules/security.yml" ] && RULES_FILE="$GIT_ROOT/rules/security.yml"
 
 if command -v opengrep >/dev/null 2>&1 && [ -n "$RULES_FILE" ]; then
-  opengrep scan --quiet --config="$RULES_FILE" $STAGED 2>/dev/null || true
+  TMPFILE=$(mktemp)
+  opengrep scan --json --quiet --config="$RULES_FILE" $STAGED > "$TMPFILE" 2>/dev/null || true
+  DISMISSED_FILE="$GIT_ROOT/.appsec/dismissed.json"
+  if [ -f "$DISMISSED_FILE" ] && command -v python3 >/dev/null 2>&1; then
+    python3 -c "
+import json,sys,os
+try:
+ data=json.load(open('$TMPFILE'));results=data.get('results',[])
+except: results=[]
+finally: os.path.exists('$TMPFILE') and os.unlink('$TMPFILE')
+if not results: sys.exit(0)
+dk=set()
+try:
+ for d in json.load(open('$DISMISSED_FILE')):
+  rid=d.get('id','');rn=rid.split('.rules.')[-1] if '.rules.' in rid else rid.split('.')[-1]
+  dk.add((rn,d.get('file',''),d.get('line',0)));dk.add((rn,d.get('file',''),0))
+except: pass
+fl=[]
+for r in results:
+ cid=r.get('check_id','');rn=cid.split('.rules.')[-1] if '.rules.' in cid else cid.split('.')[-1]
+ fp=r.get('path','');ln=r.get('start',{}).get('line',0)
+ if (rn,fp,ln) not in dk and (rn,fp,0) not in dk: fl.append(r)
+if not fl: sys.exit(0)
+print(f'\n{len(fl)} finding(s):')
+for r in fl:
+ print(f'  {r.get(\"path\",\"?\")}:{r.get(\"start\",{}).get(\"line\",\"?\")} {r.get(\"check_id\",\"\").split(\".\")[-1]}')
+" 2>/dev/null || true
+  else
+    rm -f "$TMPFILE"
+    opengrep scan --quiet --config="$RULES_FILE" $STAGED 2>/dev/null || true
+  fi
   exit 0
 fi
 
@@ -1367,6 +1397,9 @@ async function markFindingFixed(findingArg: unknown, sidebarProvider: SecuritySi
 	currentFindings = currentFindings.filter(f =>
 		!(f.id === findingInfo.id && f.file === findingInfo.file && f.line === findingInfo.line)
 	);
+
+	// Persist as dismissed so pre-commit hook also skips it
+	persistDismissal(findingInfo);
 
 	// Update diagnostics and sidebar
 	updateDiagnostics(currentFindings);
