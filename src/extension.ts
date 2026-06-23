@@ -1678,24 +1678,60 @@ async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise
 
 	const criticalCount = findings.filter(f => f.severity === 'critical').length;
 	const highCount = findings.filter(f => f.severity === 'high').length;
-	const otherCount = findings.length - criticalCount - highCount;
+	const mediumCount = findings.filter(f => f.severity === 'medium').length;
+	const lowCount = findings.length - criticalCount - highCount - mediumCount;
 
-	let summary = '🛡️ ';
-	const parts: string[] = [];
-	if (criticalCount > 0) { parts.push(`${criticalCount} critical`); }
-	if (highCount > 0) { parts.push(`${highCount} high`); }
-	if (otherCount > 0) { parts.push(`${otherCount} other`); }
+	// Build severity breakdown line
+	const severityParts: string[] = [];
+	if (criticalCount > 0) { severityParts.push(`\u{1F534} ${criticalCount} critical`); }
+	if (highCount > 0) { severityParts.push(`\u{1F7E0} ${highCount} high`); }
+	if (mediumCount > 0) { severityParts.push(`\u{1F7E1} ${mediumCount} medium`); }
+	if (lowCount > 0) { severityParts.push(`\u{1F535} ${lowCount} low`); }
 
-	summary += `${parts.join(', ')} finding(s) detectado(s).`;
+	// Build affected files list (deduplicated, max 5)
+	const affectedFiles = [...new Set(findings.map(f => f.file))];
+	const fileList = affectedFiles.slice(0, 5).map(f => `  \u2022 ${f}`).join('\n');
+	const moreFiles = affectedFiles.length > 5 ? `\n  ... e mais ${affectedFiles.length - 5} arquivo(s)` : '';
 
-	const action = await vscode.window.showWarningMessage(
-		summary,
-		'Ver Findings',
-		'Ignorar'
-	);
+	// Build detail text for the modal
+	const detailLines: string[] = [
+		severityParts.join('  \u2502  '),
+		'',
+		'\u2500\u2500\u2500 Arquivos afetados \u2500\u2500\u2500',
+		fileList + moreFiles,
+		'',
+		`Total: ${findings.length} vulnerabilidade(s) em ${affectedFiles.length} arquivo(s).`,
+		'',
+		'Corrija antes de fazer push ou marque como falso positivo na sidebar.',
+	];
 
-	if (action === 'Ver Findings') {
-		await vscode.commands.executeCommand('cybersecurity.findingsView.focus');
+	// Use modal for critical/high findings — they deserve full attention
+	const hasCritical = criticalCount > 0 || highCount > 0;
+	const title = hasCritical
+		? `\u{1F6A8} AppSec \u2014 ${findings.length} vulnerabilidade(s) detectada(s)`
+		: `\u{26A0}\u{FE0F} AppSec \u2014 ${findings.length} finding(s) detectado(s)`;
+
+	if (hasCritical) {
+		const action = await vscode.window.showWarningMessage(
+			title,
+			{ modal: true, detail: detailLines.join('\n') },
+			'Ver Findings',
+			'Ignorar'
+		);
+
+		if (action === 'Ver Findings') {
+			await vscode.commands.executeCommand('cybersecurity.findingsView.focus');
+		}
+	} else {
+		const action = await vscode.window.showWarningMessage(
+			title,
+			'Ver Findings',
+			'Ignorar'
+		);
+
+		if (action === 'Ver Findings') {
+			await vscode.commands.executeCommand('cybersecurity.findingsView.focus');
+		}
 	}
 }
 

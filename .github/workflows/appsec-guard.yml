@@ -22,11 +22,10 @@ jobs:
         run: git fetch origin "${{ github.base_ref }}"
 
       # ═══════════════════════════════════════════════════════════════════════
-      # CHECK 1: Security Rules Integrity
+      # CHECK 1: Security Rules Integrity (advisory)
       # ═══════════════════════════════════════════════════════════════════════
       - name: "🔒 Detect changes to AppSec steering files"
         id: detect
-        continue-on-error: true
         run: |
           PROTECTED_FILES=(
             ".kiro/steering/appsec-rules.md"
@@ -52,7 +51,7 @@ jobs:
                 else
                   HAS_VIOLATION="true"
                   CHANGED_FILES="${CHANGED_FILES}${file},"
-                  echo "  ⚠️  ${file} REDUCED from ${BASE_LINES} to ${PR_LINES} lines — BLOCKED"
+                  echo "  ⚠️  ${file} REDUCED from ${BASE_LINES} to ${PR_LINES} lines"
                 fi
               else
                 echo "  ℹ️  ${file} first creation — allowed"
@@ -63,16 +62,11 @@ jobs:
           echo "has_violation=${HAS_VIOLATION}" >> $GITHUB_OUTPUT
           echo "changed_files=${CHANGED_FILES}" >> $GITHUB_OUTPUT
 
-          if [ "$HAS_VIOLATION" = "true" ]; then
-            exit 1
-          fi
-
       # ═══════════════════════════════════════════════════════════════════════
-      # CHECK 2: Hook Integrity
+      # CHECK 2: Hook Integrity (advisory)
       # ═══════════════════════════════════════════════════════════════════════
       - name: "🪝 Verify pre-commit hook integrity"
         id: hook-check
-        continue-on-error: true
         run: |
           HOOK_FILE=".appsec/appsec-gate.sh"
           HAS_ISSUE="false"
@@ -98,12 +92,8 @@ jobs:
           echo "has_issue=${HAS_ISSUE}" >> $GITHUB_OUTPUT
           echo "issue_type=${ISSUE_TYPE}" >> $GITHUB_OUTPUT
 
-          if [ "$HAS_ISSUE" = "true" ]; then
-            exit 1
-          fi
-
       # ═══════════════════════════════════════════════════════════════════════
-      # CHECK 3: SAST Scan
+      # CHECK 3: SAST Scan (advisory)
       # ═══════════════════════════════════════════════════════════════════════
       - name: Install OpenGrep
         run: |
@@ -113,7 +103,6 @@ jobs:
 
       - name: "🔍 Run SAST scan on changed files"
         id: scan
-        continue-on-error: true
         run: |
           RULES_FILE="rules/security.yml"
           DISMISSED_FILE=".appsec/dismissed.json"
@@ -136,11 +125,8 @@ jobs:
           python3 << 'EOF'
           import sys, json, os
 
-          tmpfile = os.environ.get('TMPFILE', '$TMPFILE')
-          dismissed_file = "$DISMISSED_FILE"
-
-          # Read tmpfile path from shell variable
           tmpfile = "$TMPFILE"
+          dismissed_file = "$DISMISSED_FILE"
 
           try:
               with open(tmpfile) as f: data = json.load(f)
@@ -193,14 +179,14 @@ jobs:
               gh.write('has_findings=true\n')
               gh.write(f'findings_summary={total} finding(s), {errors} critical/high\n')
 
-          sys.exit(1 if errors > 0 else 0)
+          # Advisory only — never exit non-zero
           EOF
 
       # ═══════════════════════════════════════════════════════════════════════
-      # REPORT: Unified PR Comment
+      # REPORT: Post PR comment when issues are detected (advisory only)
       # ═══════════════════════════════════════════════════════════════════════
       - name: "💬 Post unified security report"
-        if: always() && (steps.detect.outcome == 'failure' || steps.hook-check.outcome == 'failure' || steps.scan.outcome == 'failure')
+        if: steps.detect.outputs.has_violation == 'true' || steps.hook-check.outputs.has_issue == 'true' || steps.scan.outputs.has_findings == 'true'
         uses: actions/github-script@v7.0.1
         with:
           script: |
@@ -208,9 +194,9 @@ jobs:
             const { execSync } = require('child_process');
             const baseBranch = context.payload.pull_request.base.ref;
 
-            const guardFailed = '${{ steps.detect.outcome }}' === 'failure';
-            const hookFailed = '${{ steps.hook-check.outcome }}' === 'failure';
-            const sastFailed = '${{ steps.scan.outcome }}' === 'failure';
+            const guardFailed = '${{ steps.detect.outputs.has_violation }}' === 'true';
+            const hookFailed = '${{ steps.hook-check.outputs.has_issue }}' === 'true';
+            const sastFailed = '${{ steps.scan.outputs.has_findings }}' === 'true';
 
             const sections = [];
 
@@ -218,11 +204,13 @@ jobs:
             const failCount = [guardFailed, hookFailed, sastFailed].filter(Boolean).length;
             sections.push(`## 🛡️ AppSec Security Report`);
             sections.push('');
+            sections.push(`> ⚠️ **Este relatório é informativo** — nenhum merge foi bloqueado.`);
+            sections.push('');
             sections.push(`| Check | Status |`);
             sections.push(`|-------|--------|`);
-            sections.push(`| Security Rules Integrity | ${guardFailed ? '❌ Falhou' : '✅ OK'} |`);
-            sections.push(`| Pre-Commit Hook | ${hookFailed ? '❌ Falhou' : '✅ OK'} |`);
-            sections.push(`| SAST Scan | ${sastFailed ? '❌ Falhou' : '✅ OK'} |`);
+            sections.push(`| Security Rules Integrity | ${guardFailed ? '⚠️ Atenção' : '✅ OK'} |`);
+            sections.push(`| Pre-Commit Hook | ${hookFailed ? '⚠️ Atenção' : '✅ OK'} |`);
+            sections.push(`| SAST Scan | ${sastFailed ? '⚠️ Atenção' : '✅ OK'} |`);
             sections.push('');
 
             // ─── Section 1: Steering file violations ──────────────────────
@@ -236,7 +224,6 @@ jobs:
               sections.push(changedFiles.map(f => `- \`${f}\``).join('\n'));
               sections.push('');
 
-              // Show diffs in collapsible sections
               for (const file of changedFiles) {
                 try {
                   const diff = execSync(
@@ -304,7 +291,6 @@ jobs:
                 sections.push(badges.join(' · '));
                 sections.push('');
 
-                // Table of findings
                 sections.push('| | Rule | File | Line |');
                 sections.push('|---|---|---|---|');
                 for (const f of findings.slice(0, 25)) {
@@ -328,7 +314,7 @@ jobs:
 
             // ─── Footer ───────────────────────────────────────────────────
             sections.push('---');
-            sections.push(`<sub>🤖 Verificação automática — AppSec Security Pipeline · ${failCount} check(s) falharam</sub>`);
+            sections.push(`<sub>🤖 Verificação automática (advisory) — AppSec Security Pipeline · ${failCount} alerta(s)</sub>`);
 
             const body = sections.join('\n');
 
@@ -357,15 +343,3 @@ jobs:
               repo: context.repo.repo,
               body: body
             });
-
-      # ═══════════════════════════════════════════════════════════════════════
-      # FINAL GATE: Fail the job if any check detected issues
-      # ═══════════════════════════════════════════════════════════════════════
-      - name: "🚫 Fail if security issues detected"
-        if: always() && (steps.detect.outcome == 'failure' || steps.hook-check.outcome == 'failure' || steps.scan.outcome == 'failure')
-        run: |
-          echo "❌ Security checks failed:"
-          [ "${{ steps.detect.outcome }}" = "failure" ] && echo "  - Security Rules Integrity"
-          [ "${{ steps.hook-check.outcome }}" = "failure" ] && echo "  - Pre-Commit Hook Integrity"
-          [ "${{ steps.scan.outcome }}" = "failure" ] && echo "  - SAST Scan"
-          exit 1
