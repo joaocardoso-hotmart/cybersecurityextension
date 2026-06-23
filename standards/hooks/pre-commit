@@ -1,10 +1,11 @@
 #!/bin/bash
-# AppSec Pre-Commit Hook — Advisory Only
+# AppSec Pre-Commit Hook — Advisory Only (filters dismissed findings)
 STATE_DIR=".appsec"
+DISMISSED_FILE="$STATE_DIR/dismissed.json"
 RULES_FILE="rules/security.yml"
 mkdir -p "$STATE_DIR"
 
-# Only scan code files (not markdown, yaml, etc.)
+# Only scan code files
 STAGED=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR | grep -iE '\.(ts|tsx|js|jsx|java|py|go|rb|php|c|cpp|cs|swift|kt|rs|scala)$')
 [ -z "$STAGED" ] && exit 0
 
@@ -13,5 +14,108 @@ if [ ! -f "$RULES_FILE" ]; then
   [ -f "$GIT_ROOT/rules/security.yml" ] && RULES_FILE="$GIT_ROOT/rules/security.yml" || exit 0
 fi
 command -v opengrep &>/dev/null || exit 0
-opengrep scan --quiet --config="$RULES_FILE" $STAGED 2>/dev/null || true
+
+# Run with JSON output so we can filter dismissed findings
+TMPFILE=$(mktemp)
+opengrep scan --json --quiet --config="$RULES_FILE" $STAGED > "$TMPFILE" 2>/dev/null || true
+
+# If no dismissed.json or no python3, fall back to simple display
+if [ ! -f "$DISMISSED_FILE" ] || ! command -v python3 &>/dev/null; then
+  # Show findings in human-readable format
+  python3 -c "
+import json, sys
+try:
+  data = json.load(open('$TMPFILE'))
+  results = data.get('results', [])
+  if not results: sys.exit(0)
+  print()
+  print(f'┌────────────────┐')
+  print(f'│ {len(results)} Code Finding{\"s\" if len(results)!=1 else \"\"} │')
+  print(f'└────────────────┘')
+  print()
+  for r in results:
+    f = r.get('path','?')
+    line = r.get('start',{}).get('line','?')
+    cid = r.get('check_id','').split('.')[-1]
+    msg = r.get('extra',{}).get('message','')[:80]
+    print(f'    {f}')
+    print(f'   ❯❯❱ {cid}')
+    print(f'          {msg}')
+    print(f'           {line}┆ {r.get(\"extra\",{}).get(\"lines\",\"\").strip()[:100]}')
+    print()
+except: pass
+" 2>/dev/null || opengrep scan --quiet --config="$RULES_FILE" $STAGED 2>/dev/null || true
+  rm -f "$TMPFILE"
+  exit 0
+fi
+
+# Filter dismissed findings and display
+python3 << 'EOF'
+import json, sys, os
+
+tmpfile = os.environ.get('TMPFILE', '')
+if not tmpfile:
+    tmpfile = "$TMPFILE"
+
+dismissed_file = "$DISMISSED_FILE"
+
+try:
+    with open(tmpfile) as f:
+        data = json.load(f)
+    results = data.get('results', [])
+except:
+    results = []
+finally:
+    if os.path.exists(tmpfile):
+        os.unlink(tmpfile)
+
+if not results:
+    sys.exit(0)
+
+# Load dismissed
+dismissed_keys = set()
+try:
+    with open(dismissed_file) as f:
+        dismissed = json.load(f)
+    for d in dismissed:
+        rid = d.get('id', '')
+        # Normalize: extract rule name after ".rules."
+        rn = rid.split('.rules.')[-1] if '.rules.' in rid else rid.split('.')[-1]
+        dismissed_keys.add((rn, d.get('file', ''), d.get('line', 0)))
+        dismissed_keys.add((rn, d.get('file', ''), 0))  # any line
+except:
+    pass
+
+# Filter
+filtered = []
+for r in results:
+    cid = r.get('check_id', '')
+    rn = cid.split('.rules.')[-1] if '.rules.' in cid else cid.split('.')[-1]
+    fp = r.get('path', '')
+    ln = r.get('start', {}).get('line', 0)
+    if (rn, fp, ln) not in dismissed_keys and (rn, fp, 0) not in dismissed_keys:
+        filtered.append(r)
+
+if not filtered:
+    sys.exit(0)
+
+# Display
+print()
+print(f'\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510')
+print(f'\u2502 {len(filtered)} Code Finding{"s" if len(filtered)!=1 else ""} \u2502')
+print(f'\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518')
+print()
+for r in filtered:
+    f = r.get('path', '?')
+    line = r.get('start', {}).get('line', '?')
+    cid = r.get('check_id', '').split('.')[-1]
+    msg = r.get('extra', {}).get('message', '')[:80]
+    snippet = r.get('extra', {}).get('lines', '').strip()[:100]
+    print(f'    {f}')
+    print(f'   \u276f\u276f\u2771 {cid}')
+    print(f'          {msg}')
+    print(f'           {line}\u2506 {snippet}')
+    print()
+EOF
+
 exit 0
