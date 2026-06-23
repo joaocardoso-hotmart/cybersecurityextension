@@ -30,6 +30,8 @@ export function isOpenGrepInstalled(): boolean {
 
 /**
  * Async version of isOpenGrepInstalled (non-blocking).
+ * On Windows, also searches common installation directories that winget/pip
+ * may use but that are not always on VS Code's inherited PATH.
  */
 async function checkOpenGrepAsync(): Promise<boolean> {
 	if (_opengrepAvailable !== null) {
@@ -40,9 +42,65 @@ async function checkOpenGrepAsync(): Promise<boolean> {
 		_opengrepAvailable = true;
 		return true;
 	} catch {
+		// On Windows, winget and pip install binaries to directories that may not
+		// be on the PATH inherited by the VS Code process. Search those paths explicitly.
+		if (process.platform === 'win32' && await findOpenGrepOnWindows()) {
+			_opengrepAvailable = true;
+			return true;
+		}
 		_opengrepAvailable = false;
 		return false;
 	}
+}
+
+/**
+ * Searches common Windows installation paths for opengrep.exe.
+ * Covers: winget links directory, local programs, and Python Scripts folders
+ * for any installed Python version (pip places binaries there).
+ */
+async function findOpenGrepOnWindows(): Promise<boolean> {
+	const appData = process.env.APPDATA || '';
+	const localAppData = process.env.LOCALAPPDATA || '';
+
+	// Static candidates: winget and direct program installs
+	const staticCandidates = [
+		path.join(localAppData, 'Microsoft', 'WinGet', 'Links', 'opengrep.exe'),
+		path.join(localAppData, 'Programs', 'opengrep', 'opengrep.exe'),
+	].filter(Boolean);
+
+	for (const candidate of staticCandidates) {
+		try {
+			if (fs.existsSync(candidate)) {
+				await execFileAsync(candidate, ['--version'], { encoding: 'utf-8', timeout: 5000 });
+				return true;
+			}
+		} catch { /* try next */ }
+	}
+
+	// Python Scripts directories — pip installs binaries here, path is version-dependent
+	// e.g. %APPDATA%\Python\Python312\Scripts\opengrep.exe
+	const pythonSearchBases = [
+		appData ? path.join(appData, 'Python') : '',
+		localAppData ? path.join(localAppData, 'Programs', 'Python') : '',
+	].filter(Boolean);
+
+	for (const searchBase of pythonSearchBases) {
+		try {
+			if (!fs.existsSync(searchBase)) { continue; }
+			const subdirs = fs.readdirSync(searchBase);
+			for (const subdir of subdirs) {
+				const candidate = path.join(searchBase, subdir, 'Scripts', 'opengrep.exe');
+				if (fs.existsSync(candidate)) {
+					try {
+						await execFileAsync(candidate, ['--version'], { encoding: 'utf-8', timeout: 5000 });
+						return true;
+					} catch { /* not functional, try next */ }
+				}
+			}
+		} catch { /* directory not accessible */ }
+	}
+
+	return false;
 }
 
 /**
@@ -153,16 +211,27 @@ export async function installOpenGrep(): Promise<boolean> {
 
 	// Platform-specific failure message
 	const installHint = process.platform === 'win32'
-		? 'Instale manualmente via: winget install OpenGrep.OpenGrep ou pip install opengrep'
-		: 'Instale manualmente via: brew install opengrep/tap/opengrep ou pip3 install opengrep';
+		? 'Instale manualmente via: winget install OpenGrep.OpenGrep'
+		: 'Instale manualmente via: brew install opengrep/tap/opengrep';
 
 	const action = await vscode.window.showErrorMessage(
 		`[Hotmart AppSec] Não conseguimos instalar o OpenGrep automaticamente. ${installHint}`,
-		'Ver Instruções'
+		'Ver Instruções',
+		'Tentar novamente'
 	);
 
 	if (action === 'Ver Instruções') {
 		vscode.env.openExternal(vscode.Uri.parse('https://github.com/opengrep/opengrep#installation'));
+	} else if (action === 'Tentar novamente') {
+		// Cache is already null from the invalidateOpenGrepCache() call at the start of this function.
+		// Re-running the check picks up a manual install that happened while the error was shown.
+		if (await checkOpenGrepAsync()) {
+			vscode.window.showInformationMessage('[Hotmart AppSec] ✅ OpenGrep detectado! Scanner de segurança pronto. 🔍');
+			return true;
+		}
+		vscode.window.showWarningMessage(
+			'[Hotmart AppSec] OpenGrep ainda não encontrado. Verifique se está no PATH e reinicie o VS Code.'
+		);
 	}
 
 	return false;
