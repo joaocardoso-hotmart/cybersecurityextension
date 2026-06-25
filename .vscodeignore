@@ -12,6 +12,8 @@ node_modules/**
 deploy/**
 dist/**
 scripts/**
+Hotmart Appsec/**
+standards/org-workflow/**
 
 # Spec documentation (not needed in runtime)
 .kiro/**
@@ -37,3 +39,6 @@ out/**/*.map
 # OS files
 .DS_Store
 Thumbs.db
+
+# Lock files (not needed at runtime)
+package-lock.json

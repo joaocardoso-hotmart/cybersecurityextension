@@ -6,7 +6,7 @@ import { execFile, execSync } from 'child_process';
 import { promisify } from 'util';
 import { SecuritySidebarProvider } from './sidebar';
 import { scanChangedLines, SecurityFinding, Severity, setExtensionPath } from './scanner';
-import { ensureOpenGrep, runOpenGrep } from './semgrep';
+import { ensureOpenGrep, setOpenGrepContext } from './semgrep';
 
 const execFileAsync = promisify(execFile);
 
@@ -189,13 +189,11 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
-	// Watch for file saves — re-scan to auto-remove fixed findings
-	registerFileSaveWatcher(context, sidebarProvider);
-
-	// Watch for git operations (commit / staging)
+	// Watch for git operations (staging / git add)
 	registerGitWatcher(context, sidebarProvider);
 
-	// Ensure OpenGrep is installed
+	// Ensure OpenGrep is installed (with cooldown to avoid spamming on Windows)
+	setOpenGrepContext(context);
 	ensureOpenGrep();
 
 	// Detect install/update of the extension to force hook re-installation
@@ -1466,65 +1464,7 @@ function persistDismissal(findingInfo: { id: string; file: string; line: number 
 	}
 }
 
-// ─── FILE SAVE WATCHER (auto-remove fixed findings) ──────────────────────────
-
-function registerFileSaveWatcher(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
-	let rescanTimer: NodeJS.Timeout | undefined;
-	const pendingFiles = new Set<string>();
-
-	const listener = vscode.workspace.onDidSaveTextDocument((document) => {
-		const filePath = vscode.workspace.asRelativePath(document.uri);
-
-		// Skip excluded paths early
-		if (isExcludedFilePath(filePath)) {
-			return;
-		}
-
-		// Accumulate files saved in quick succession for batch scanning
-		pendingFiles.add(filePath);
-
-		// Debounce: wait for rapid saves to settle, then scan all pending files at once
-		if (rescanTimer) {
-			clearTimeout(rescanTimer);
-		}
-
-		rescanTimer = setTimeout(async () => {
-			if (pendingFiles.size === 0) { return; }
-
-			// Snapshot and clear pending files immediately to avoid race conditions
-			const filesToScan = [...pendingFiles];
-			pendingFiles.clear();
-
-			try {
-				const workspaceFolders = vscode.workspace.workspaceFolders;
-				if (!workspaceFolders) { return; }
-
-				const workspaceFolder = workspaceFolders[0].uri.fsPath;
-
-				// Batch scan all saved files in one OpenGrep invocation
-				const freshFindings = await runOpenGrep(filesToScan, workspaceFolder, context.extensionPath);
-
-				// Remove old findings for scanned files and replace with fresh ones
-				const scannedSet = new Set(filesToScan);
-				const otherFindings = currentFindings.filter(f => !scannedSet.has(f.file));
-				currentFindings = [...otherFindings, ...freshFindings];
-
-				// Reset notification fingerprint so git watcher shows fresh results
-				lastNotificationFingerprint = '';
-
-				// Update diagnostics and sidebar
-				updateDiagnostics(currentFindings);
-				sidebarProvider.updateFindings(currentFindings);
-			} catch (err) {
-				console.error('[Hotmart AppSec] File save re-scan error:', err);
-			}
-		}, 800);
-	});
-
-	context.subscriptions.push(listener);
-}
-
-// ─── GIT WATCHER (triggers scan on commit/stage) ─────────────────────────────
+// ─── GIT WATCHER (triggers scan on staging / git add) ────────────────────────
 
 function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: SecuritySidebarProvider): void {
 	const workspaceFolder = getWorkspaceFolder();
@@ -1607,24 +1547,20 @@ function registerGitWatcher(context: vscode.ExtensionContext, sidebarProvider: S
 		if (!filename) { return; }
 		if (!ready) { return; }
 
-		// Trigger on:
-		//   - index            → git add / git reset (staging changes)
-		//   - COMMIT_EDITMSG    → git commit
-		if (filename !== 'index' && filename !== 'COMMIT_EDITMSG') {
+		// Trigger only on index changes (git add / git reset = staging)
+		if (filename !== 'index') {
 			return;
 		}
 
-		// For index changes, confirm the index was actually rewritten by comparing mtime
-		if (filename === 'index') {
-			try {
-				const stat = fs.statSync(path.join(gitDir, 'index'));
-				if (stat.mtimeMs === lastIndexMtime) {
-					return;
-				}
-				lastIndexMtime = stat.mtimeMs;
-			} catch {
-				// index momentarily missing during the lock→index rename; let the scan run anyway
+		// Confirm the index was actually rewritten by comparing mtime
+		try {
+			const stat = fs.statSync(path.join(gitDir, 'index'));
+			if (stat.mtimeMs === lastIndexMtime) {
+				return;
 			}
+			lastIndexMtime = stat.mtimeMs;
+		} catch {
+			// index momentarily missing during the lock→index rename; let the scan run anyway
 		}
 
 		triggerScan();
@@ -1678,24 +1614,60 @@ async function onGitOperation(sidebarProvider: SecuritySidebarProvider): Promise
 
 	const criticalCount = findings.filter(f => f.severity === 'critical').length;
 	const highCount = findings.filter(f => f.severity === 'high').length;
-	const otherCount = findings.length - criticalCount - highCount;
+	const mediumCount = findings.filter(f => f.severity === 'medium').length;
+	const lowCount = findings.length - criticalCount - highCount - mediumCount;
 
-	let summary = '🛡️ ';
-	const parts: string[] = [];
-	if (criticalCount > 0) { parts.push(`${criticalCount} critical`); }
-	if (highCount > 0) { parts.push(`${highCount} high`); }
-	if (otherCount > 0) { parts.push(`${otherCount} other`); }
+	// Build severity breakdown line
+	const severityParts: string[] = [];
+	if (criticalCount > 0) { severityParts.push(`\u{1F534} ${criticalCount} critical`); }
+	if (highCount > 0) { severityParts.push(`\u{1F7E0} ${highCount} high`); }
+	if (mediumCount > 0) { severityParts.push(`\u{1F7E1} ${mediumCount} medium`); }
+	if (lowCount > 0) { severityParts.push(`\u{1F535} ${lowCount} low`); }
 
-	summary += `${parts.join(', ')} finding(s) detectado(s).`;
+	// Build affected files list (deduplicated, max 5)
+	const affectedFiles = [...new Set(findings.map(f => f.file))];
+	const fileList = affectedFiles.slice(0, 5).map(f => `  \u2022 ${f}`).join('\n');
+	const moreFiles = affectedFiles.length > 5 ? `\n  ... e mais ${affectedFiles.length - 5} arquivo(s)` : '';
 
-	const action = await vscode.window.showWarningMessage(
-		summary,
-		'Ver Findings',
-		'Ignorar'
-	);
+	// Build detail text for the modal
+	const detailLines: string[] = [
+		severityParts.join('  \u2502  '),
+		'',
+		'\u2500\u2500\u2500 Arquivos afetados \u2500\u2500\u2500',
+		fileList + moreFiles,
+		'',
+		`Total: ${findings.length} vulnerabilidade(s) em ${affectedFiles.length} arquivo(s).`,
+		'',
+		'Corrija antes de fazer push ou marque como falso positivo na sidebar.',
+	];
 
-	if (action === 'Ver Findings') {
-		await vscode.commands.executeCommand('cybersecurity.findingsView.focus');
+	// Use modal for critical/high findings — they deserve full attention
+	const hasCritical = criticalCount > 0 || highCount > 0;
+	const title = hasCritical
+		? `\u{1F6A8} AppSec \u2014 ${findings.length} vulnerabilidade(s) detectada(s)`
+		: `\u{26A0}\u{FE0F} AppSec \u2014 ${findings.length} finding(s) detectado(s)`;
+
+	if (hasCritical) {
+		const action = await vscode.window.showWarningMessage(
+			title,
+			{ modal: true, detail: detailLines.join('\n') },
+			'Ver Findings',
+			'Ignorar'
+		);
+
+		if (action === 'Ver Findings') {
+			await vscode.commands.executeCommand('cybersecurity.findingsView.focus');
+		}
+	} else {
+		const action = await vscode.window.showWarningMessage(
+			title,
+			'Ver Findings',
+			'Ignorar'
+		);
+
+		if (action === 'Ver Findings') {
+			await vscode.commands.executeCommand('cybersecurity.findingsView.focus');
+		}
 	}
 }
 
@@ -1729,8 +1701,8 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 	// Install preToolUse hooks only for the detected IDE
 	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
 
-	// GitHub workflow (always force on bootstrap)
-	applied += await applyGitHubWorkflow(context, workspaceFolder, true);
+	// Clean up any locally-installed workflow (now centralized in GitHub Actions)
+	cleanupLocalWorkflow(workspaceFolder);
 
 	if (applied > 0) {
 		vscode.window.showInformationMessage(
@@ -1758,8 +1730,8 @@ async function updateStandards(context: vscode.ExtensionContext): Promise<void> 
 	// Always update Claude rules
 	updated += await applyClaudeFiles(context, workspaceFolder, true);
 
-	// Update GitHub workflow (force overwrite)
-	updated += await applyGitHubWorkflow(context, workspaceFolder, true);
+	// Clean up any locally-installed workflow (now centralized in GitHub Actions)
+	cleanupLocalWorkflow(workspaceFolder);
 
 	if (updated > 0) {
 		vscode.window.showInformationMessage(`[Hotmart AppSec] ✅ Padrões corporativos atualizados: ${updated} arquivo(s) sincronizado(s) para ${detectIDE()}. 🔄`);
@@ -1857,8 +1829,8 @@ async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFold
 	// Install security hooks only for the current IDE
 	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
 
-	// GitHub workflow — deploy/update on install/update, cleanup legacy ci-cd.yml
-	applied += await applyGitHubWorkflow(context, workspaceFolder, force);
+	// Clean up any locally-installed workflow (now centralized in GitHub Actions)
+	cleanupLocalWorkflow(workspaceFolder);
 
 	if (!silent && applied > 0) {
 		vscode.window.showInformationMessage(`[Hotmart AppSec] ✅ Padrões de segurança corporativa aplicados: ${applied} arquivo(s) para ${currentIde}. 🎯`);
@@ -2009,58 +1981,38 @@ async function installClaudeHook(context: vscode.ExtensionContext, workspaceFold
 // ─── GITHUB WORKFLOW ──────────────────────────────────────────────────────────
 
 /**
- * Deploys/updates the AppSec GitHub workflow and cleans up legacy workflow files.
- * On install/update (force=true), always overwrites with the latest version.
- * Also removes ci-cd.yml if it was left behind by older versions of the extension.
+ * Removes locally-installed workflow files that were deployed by previous versions
+ * of this extension. Starting from v0.9.4, the GitHub Actions workflow is managed
+ * centrally (committed directly to repos or via org-level workflow) and MUST NOT
+ * be installed by the extension to avoid conflicts.
+ *
+ * Cleans up: appsec-guard.yml and legacy ci-cd.yml.
  */
-async function applyGitHubWorkflow(
-	context: vscode.ExtensionContext,
-	workspaceFolder: string,
-	force: boolean = false
-): Promise<number> {
+function cleanupLocalWorkflow(workspaceFolder: string): void {
 	const targetDir = path.join(workspaceFolder, '.github', 'workflows');
-	const sourceFile = path.join(context.extensionPath, 'standards', 'org-workflow', 'appsec-guard.yml');
-	const destFile = path.join(targetDir, 'appsec-guard.yml');
+	if (!fs.existsSync(targetDir)) { return; }
 
-	if (!fs.existsSync(sourceFile)) {
-		console.error(`[Hotmart AppSec] applyGitHubWorkflow: source not found: ${sourceFile}`);
-		return 0;
-	}
+	const LEGACY_WORKFLOWS = ['appsec-guard.yml', 'ci-cd.yml'];
 
-	let count = 0;
-
-	// Clean up legacy ci-cd.yml generated by older versions of the extension
-	const legacyCiCd = path.join(targetDir, 'ci-cd.yml');
-	if (fs.existsSync(legacyCiCd)) {
+	for (const fileName of LEGACY_WORKFLOWS) {
+		const filePath = path.join(targetDir, fileName);
 		try {
-			fs.unlinkSync(legacyCiCd);
-			console.log(`[Hotmart AppSec] Removed legacy ci-cd.yml from ${targetDir}`);
-			count++;
+			if (fs.existsSync(filePath)) {
+				fs.unlinkSync(filePath);
+				console.log(`[Hotmart AppSec] Removed local workflow (now centralized in GitHub Actions): ${filePath}`);
+			}
 		} catch (err) {
-			console.warn(`[Hotmart AppSec] Could not remove legacy ci-cd.yml:`, err);
+			console.warn(`[Hotmart AppSec] Could not remove local workflow ${fileName}:`, err);
 		}
 	}
 
-	// Deploy or update appsec-guard.yml
-	if (!fs.existsSync(targetDir)) {
-		fs.mkdirSync(targetDir, { recursive: true });
-	}
-
-	const sourceContent = fs.readFileSync(sourceFile, 'utf-8');
-
-	if (fs.existsSync(destFile)) {
-		const destContent = fs.readFileSync(destFile, 'utf-8');
-		if (sourceContent === destContent) {
-			return count; // Already up to date
+	// Remove empty .github/workflows directory
+	try {
+		if (fs.existsSync(targetDir) && fs.readdirSync(targetDir).length === 0) {
+			fs.rmdirSync(targetDir);
+			console.log(`[Hotmart AppSec] Removed empty workflows dir: ${targetDir}`);
 		}
-		if (!force) {
-			return count; // Don't overwrite unless forced (install/update)
-		}
-	}
-
-	fs.writeFileSync(destFile, sourceContent, 'utf-8');
-	console.log(`[Hotmart AppSec] GitHub workflow installed/updated at ${destFile}`);
-	return count + 1;
+	} catch { /* best effort */ }
 }
 
 /**
