@@ -3,7 +3,6 @@ import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as https from 'https';
 import { SecurityFinding, Severity, sortBySeverity } from './scanner';
 
 const execFileAsync = promisify(execFile);
@@ -22,6 +21,12 @@ const INSTALL_COOLDOWN_KEY = 'hotmartAppSec.opengrepInstallCooldown';
 const INSTALL_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Known path where the corporate MDM (Workspace ONE) installs OpenGrep on Windows.
+ * See: deploy/windows/mdm-install.ps1 → Install-OpenGrep function.
+ */
+const WINDOWS_MDM_OPENGREP = 'C:\\ProgramData\\Hotmart\\bin\\opengrep.exe';
+
+/**
  * Sets the extension context so semgrep.ts can use globalState for cooldowns.
  * Must be called once from extension.ts during activation.
  */
@@ -38,130 +43,102 @@ function getOpenGrepCommand(): string {
 
 /**
  * Checks if OpenGrep is installed (cached after first successful check).
- * Only re-checks if a previous install attempt was made.
+ * On Windows, checks the MDM install path first — the MDM already puts the
+ * binary there, so we just need to find it and use it directly.
  */
 export function isOpenGrepInstalled(): boolean {
 	if (_opengrepAvailable !== null) {
 		return _opengrepAvailable;
 	}
+
+	// On Windows: check MDM path first (instant fs check, no process spawn)
+	if (process.platform === 'win32' && fs.existsSync(WINDOWS_MDM_OPENGREP)) {
+		try {
+			execFileSync(WINDOWS_MDM_OPENGREP, ['--version'], { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 });
+			_opengrepBinaryPath = WINDOWS_MDM_OPENGREP;
+			_opengrepAvailable = true;
+			return true;
+		} catch { /* exists but not functional */ }
+	}
+
+	// Fallback: check PATH (macOS/Linux, or Windows if in PATH)
 	try {
-		execFileSync(_opengrepBinaryPath, ['--version'], { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 });
+		execFileSync('opengrep', ['--version'], { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 });
+		_opengrepBinaryPath = 'opengrep';
 		_opengrepAvailable = true;
 		return true;
 	} catch {
-		// On Windows, try finding in known paths synchronously
-		if (process.platform === 'win32') {
-			const found = findOpenGrepOnWindowsSync();
-			if (found) {
-				_opengrepBinaryPath = found;
-				_opengrepAvailable = true;
-				return true;
-			}
-		}
 		_opengrepAvailable = false;
 		return false;
 	}
 }
 
 /**
- * Async version of isOpenGrepInstalled (non-blocking).
- * On Windows, also searches common installation directories that winget/pip/MDM
- * may use but that are not always on the IDE's inherited PATH.
+ * Async check for OpenGrep (non-blocking).
+ * On Windows: MDM path → PATH → known fallback locations.
  */
 async function checkOpenGrepAsync(): Promise<boolean> {
 	if (_opengrepAvailable !== null) {
 		return _opengrepAvailable;
 	}
+
+	// Windows: check MDM path first (the MDM already installed it here)
+	if (process.platform === 'win32' && fs.existsSync(WINDOWS_MDM_OPENGREP)) {
+		try {
+			await execFileAsync(WINDOWS_MDM_OPENGREP, ['--version'], { encoding: 'utf-8', timeout: 5000 });
+			_opengrepBinaryPath = WINDOWS_MDM_OPENGREP;
+			_opengrepAvailable = true;
+			addToProcessPath(path.dirname(WINDOWS_MDM_OPENGREP));
+			console.log(`[Hotmart AppSec] OpenGrep found at MDM path: ${WINDOWS_MDM_OPENGREP}`);
+			return true;
+		} catch { /* exists but not functional */ }
+	}
+
+	// Check PATH (covers macOS/Linux and Windows when opengrep is in PATH)
 	try {
-		await execFileAsync(_opengrepBinaryPath, ['--version'], { encoding: 'utf-8', timeout: 5000 });
+		await execFileAsync('opengrep', ['--version'], { encoding: 'utf-8', timeout: 5000 });
+		_opengrepBinaryPath = 'opengrep';
 		_opengrepAvailable = true;
 		return true;
-	} catch {
-		// On Windows, winget/pip/MDM install binaries to directories that may not
-		// be on the PATH inherited by the IDE process. Search those paths explicitly.
-		if (process.platform === 'win32') {
-			const resolvedPath = await findOpenGrepOnWindows();
-			if (resolvedPath) {
-				_opengrepBinaryPath = resolvedPath;
-				_opengrepAvailable = true;
-				return true;
-			}
+	} catch { /* not in PATH */ }
+
+	// Windows: check a few more known locations as fallback
+	if (process.platform === 'win32') {
+		const found = await findOpenGrepFallback();
+		if (found) {
+			_opengrepBinaryPath = found;
+			_opengrepAvailable = true;
+			return true;
 		}
-		_opengrepAvailable = false;
-		return false;
 	}
+
+	_opengrepAvailable = false;
+	return false;
 }
 
 /**
- * All known Windows installation paths for opengrep.exe.
- * Covers: MDM installs (Hotmart), winget, scoop, pip, and direct program installs.
+ * Fallback: checks additional known Windows paths if MDM path and PATH failed.
+ * Covers winget, scoop, ProgramData, and Program Files.
  */
-function getWindowsCandidatePaths(): string[] {
+async function findOpenGrepFallback(): Promise<string | null> {
 	const localAppData = process.env.LOCALAPPDATA || '';
-	const appData = process.env.APPDATA || '';
 	const programData = process.env.ProgramData || 'C:\\ProgramData';
 
-	const candidates: string[] = [
-		// MDM install paths (Hotmart corporate deployment)
-		path.join(programData, 'Hotmart', 'bin', 'opengrep.exe'),
+	const candidates = [
+		// Analyst's proposed path (may be used in future MDM versions)
 		'C:\\Hotmart\\Instaladores\\bin\\opengrep.exe',
-		// winget links directory
+		// winget
 		path.join(localAppData, 'Microsoft', 'WinGet', 'Links', 'opengrep.exe'),
-		// Direct program installs
 		path.join(localAppData, 'Programs', 'opengrep', 'opengrep.exe'),
-		// Scoop
 		path.join(process.env.USERPROFILE || '', 'scoop', 'shims', 'opengrep.exe'),
+		path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'opengrep', 'opengrep.exe'),
+		path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'OpenGrep', 'opengrep.exe'),
 	].filter(p => p && !p.startsWith('\\'));
-
-	// Python Scripts directories — pip installs binaries here
-	const pythonSearchBases = [
-		appData ? path.join(appData, 'Python') : '',
-		localAppData ? path.join(localAppData, 'Programs', 'Python') : '',
-	].filter(Boolean);
-
-	for (const searchBase of pythonSearchBases) {
-		try {
-			if (!fs.existsSync(searchBase)) { continue; }
-			const subdirs = fs.readdirSync(searchBase);
-			for (const subdir of subdirs) {
-				candidates.push(path.join(searchBase, subdir, 'Scripts', 'opengrep.exe'));
-			}
-		} catch { /* directory not accessible */ }
-	}
-
-	return candidates;
-}
-
-/**
- * Searches common Windows installation paths for opengrep.exe (async).
- * Returns the resolved absolute path if found and functional, or null.
- */
-async function findOpenGrepOnWindows(): Promise<string | null> {
-	const candidates = getWindowsCandidatePaths();
 
 	for (const candidate of candidates) {
 		try {
 			if (fs.existsSync(candidate)) {
 				await execFileAsync(candidate, ['--version'], { encoding: 'utf-8', timeout: 5000 });
-				console.log(`[Hotmart AppSec] OpenGrep found at: ${candidate}`);
-				return candidate;
-			}
-		} catch { /* try next */ }
-	}
-
-	return null;
-}
-
-/**
- * Synchronous version of findOpenGrepOnWindows (for isOpenGrepInstalled).
- */
-function findOpenGrepOnWindowsSync(): string | null {
-	const candidates = getWindowsCandidatePaths();
-
-	for (const candidate of candidates) {
-		try {
-			if (fs.existsSync(candidate)) {
-				execFileSync(candidate, ['--version'], { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 });
 				console.log(`[Hotmart AppSec] OpenGrep found at: ${candidate}`);
 				return candidate;
 			}
@@ -180,8 +157,37 @@ function invalidateOpenGrepCache(): void {
 }
 
 /**
+ * Adds a directory to the current process PATH (so child processes can find it too).
+ * Also attempts to add to the system PATH persistently via PowerShell (best effort).
+ */
+function addToProcessPath(dir: string): void {
+	const currentPath = process.env.PATH || '';
+	if (!currentPath.includes(dir)) {
+		process.env.PATH = `${dir};${currentPath}`;
+		console.log(`[Hotmart AppSec] Added ${dir} to process PATH`);
+	}
+
+	// Best effort: persist to system PATH so the user doesn't need to restart
+	if (process.platform === 'win32') {
+		execFileAsync('powershell', [
+			'-NoProfile', '-Command',
+			`$p = [Environment]::GetEnvironmentVariable('PATH','Machine');` +
+			`if ($p -notlike '*${dir.replace(/\\/g, '\\\\')}*') {` +
+			`[Environment]::SetEnvironmentVariable('PATH', "$p;${dir}", 'Machine') }`,
+		], { encoding: 'utf-8', timeout: 5000 }).catch(() => {
+			// No admin rights — try user PATH
+			execFileAsync('powershell', [
+				'-NoProfile', '-Command',
+				`$p = [Environment]::GetEnvironmentVariable('PATH','User');` +
+				`if ($p -notlike '*${dir.replace(/\\/g, '\\\\')}*') {` +
+				`[Environment]::SetEnvironmentVariable('PATH', "$p;${dir}", 'User') }`,
+			], { encoding: 'utf-8', timeout: 5000 }).catch(() => { /* best effort */ });
+		});
+	}
+}
+
+/**
  * Checks whether the install cooldown period has elapsed.
- * Returns true if we should skip the install attempt (still in cooldown).
  */
 function isInstallOnCooldown(): boolean {
 	if (!_extensionContext) { return false; }
@@ -198,14 +204,57 @@ function markInstallAttempt(): void {
 }
 
 /**
- * Installs OpenGrep on the user's machine.
- * OpenGrep ships self-contained binaries — no Python needed.
- * On Windows, also tries downloading the binary directly from GitHub (like MDM scripts do).
+ * Installs OpenGrep.
+ * - Windows: downloads the binary to the MDM path (C:\ProgramData\Hotmart\bin\)
+ *   and adds it to PATH. Same location the MDM uses.
+ * - macOS/Linux: tries official install script, then brew, then pip.
  */
 export async function installOpenGrep(): Promise<boolean> {
 	invalidateOpenGrepCache();
 	markInstallAttempt();
 
+	if (process.platform === 'win32') {
+		// Try to install in the same path the MDM uses
+		const installed = await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: '🛡️ Instalando OpenGrep...',
+				cancellable: false,
+			},
+			async (progress) => {
+				progress.report({ message: 'Baixando binário do GitHub...' });
+				return await downloadOpenGrepToMdmPath();
+			}
+		);
+
+		if (installed) {
+			_opengrepBinaryPath = WINDOWS_MDM_OPENGREP;
+			_opengrepAvailable = true;
+			addToProcessPath(path.dirname(WINDOWS_MDM_OPENGREP));
+			vscode.window.showInformationMessage('[Hotmart AppSec] ✅ OpenGrep instalado com sucesso! 🔍');
+			return true;
+		}
+
+		// Download failed — tell user to contact IT
+		const action = await vscode.window.showWarningMessage(
+			'[Hotmart AppSec] Não foi possível instalar o OpenGrep automaticamente. ' +
+			'Verifique sua conexão ou entre em contato com o time de AppSec.',
+			'Verificar novamente',
+			'Entendi'
+		);
+
+		if (action === 'Verificar novamente') {
+			invalidateOpenGrepCache();
+			if (await checkOpenGrepAsync()) {
+				vscode.window.showInformationMessage('[Hotmart AppSec] ✅ OpenGrep detectado! 🔍');
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	// macOS / Linux: auto-install
 	const result = await vscode.window.withProgress(
 		{
 			location: vscode.ProgressLocation.Notification,
@@ -213,59 +262,7 @@ export async function installOpenGrep(): Promise<boolean> {
 			cancellable: false,
 		},
 		async (progress) => {
-			if (process.platform === 'win32') {
-				// Windows installation strategies
-				// 1. Try winget (available on Windows 10 1709+ and Windows 11)
-				try {
-					progress.report({ message: 'Tentando via winget...' });
-					await execFileAsync('winget', ['install', '--id', 'OpenGrep.OpenGrep', '-e', '--accept-source-agreements', '--accept-package-agreements'], {
-						encoding: 'utf-8',
-						timeout: 120000,
-					});
-					return true;
-				} catch { /* winget not available or package not found */ }
-
-				// 2. Try scoop (popular on dev machines)
-				try {
-					progress.report({ message: 'Tentando via scoop...' });
-					await execFileAsync('scoop', ['install', 'opengrep'], {
-						encoding: 'utf-8',
-						timeout: 120000,
-					});
-					return true;
-				} catch { /* scoop not available */ }
-
-				// 3. Download binary directly from GitHub Releases (same approach as MDM scripts)
-				try {
-					progress.report({ message: 'Baixando binário do GitHub...' });
-					const downloaded = await downloadOpenGrepBinary();
-					if (downloaded) { return true; }
-				} catch { /* download failed */ }
-
-				// 4. Try pip as fallback (Python is often available on Windows dev machines)
-				try {
-					progress.report({ message: 'Tentando via pip...' });
-					await execFileAsync('pip', ['install', 'opengrep'], {
-						encoding: 'utf-8',
-						timeout: 120000,
-					});
-					return true;
-				} catch { /* */ }
-
-				// 5. Try pip3 as last resort
-				try {
-					progress.report({ message: 'Tentando via pip3...' });
-					await execFileAsync('pip3', ['install', 'opengrep'], {
-						encoding: 'utf-8',
-						timeout: 120000,
-					});
-					return true;
-				} catch { /* */ }
-
-				return false;
-			}
-
-			// macOS / Linux: use the official install script
+			// 1. Official install script
 			try {
 				progress.report({ message: 'Baixando binário...' });
 				await execFileAsync('bash', ['-c', 'curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash'], {
@@ -273,21 +270,21 @@ export async function installOpenGrep(): Promise<boolean> {
 					timeout: 120000,
 				});
 				return true;
-			} catch {
-				// Try brew as fallback (macOS)
-				try {
-					progress.report({ message: 'Tentando via brew...' });
-					await execFileAsync('brew', ['install', 'opengrep/tap/opengrep'], {
-						encoding: 'utf-8',
-						timeout: 120000,
-					});
-					return true;
-				} catch { /* */ }
-			}
+			} catch { /* */ }
 
-			// Try pip as last resort (older method)
+			// 2. Homebrew (macOS)
 			try {
-				progress.report({ message: 'Tentando via pip...' });
+				progress.report({ message: 'Tentando via brew...' });
+				await execFileAsync('brew', ['install', 'opengrep/tap/opengrep'], {
+					encoding: 'utf-8',
+					timeout: 120000,
+				});
+				return true;
+			} catch { /* */ }
+
+			// 3. pip3 as last resort
+			try {
+				progress.report({ message: 'Tentando via pip3...' });
 				await execFileAsync('pip3', ['install', 'opengrep'], {
 					encoding: 'utf-8',
 					timeout: 120000,
@@ -301,58 +298,40 @@ export async function installOpenGrep(): Promise<boolean> {
 
 	if (result) {
 		invalidateOpenGrepCache();
-		// Re-check to resolve the actual binary path
 		await checkOpenGrepAsync();
-		vscode.window.showInformationMessage('[Hotmart AppSec] ✅ OpenGrep instalado com sucesso! Scanner de segurança pronto pra uso. 🔍');
+		vscode.window.showInformationMessage('[Hotmart AppSec] ✅ OpenGrep instalado com sucesso! 🔍');
 		return true;
 	}
 
-	// Platform-specific failure message
-	const installHint = process.platform === 'win32'
-		? 'Instale manualmente via: winget install OpenGrep.OpenGrep'
-		: 'Instale manualmente via: brew install opengrep/tap/opengrep';
-
 	const action = await vscode.window.showErrorMessage(
-		`[Hotmart AppSec] Não conseguimos instalar o OpenGrep automaticamente. ${installHint}`,
-		'Ver Instruções',
-		'Tentar novamente'
+		'[Hotmart AppSec] Não conseguimos instalar o OpenGrep. Instale manualmente via: brew install opengrep/tap/opengrep',
+		'Ver Instruções'
 	);
 
 	if (action === 'Ver Instruções') {
 		vscode.env.openExternal(vscode.Uri.parse('https://github.com/opengrep/opengrep#installation'));
-	} else if (action === 'Tentar novamente') {
-		invalidateOpenGrepCache();
-		if (await checkOpenGrepAsync()) {
-			vscode.window.showInformationMessage('[Hotmart AppSec] ✅ OpenGrep detectado! Scanner de segurança pronto. 🔍');
-			return true;
-		}
-		vscode.window.showWarningMessage(
-			'[Hotmart AppSec] OpenGrep ainda não encontrado. Verifique se está no PATH e reinicie a IDE.'
-		);
 	}
 
 	return false;
 }
 
 /**
- * Downloads the OpenGrep binary directly from GitHub Releases.
- * Installs to C:\ProgramData\Hotmart\bin\ (same path the MDM scripts use)
- * and adds it to the system PATH if possible, otherwise user PATH.
- *
- * This is the same approach used by the corporate MDM watchdog scripts.
+ * Downloads OpenGrep binary from GitHub Releases to the MDM path.
+ * Same approach the deploy/windows/mdm-install.ps1 uses.
  */
-async function downloadOpenGrepBinary(): Promise<boolean> {
-	const binDir = path.join(process.env.ProgramData || 'C:\\ProgramData', 'Hotmart', 'bin');
-	const binPath = path.join(binDir, 'opengrep.exe');
+async function downloadOpenGrepToMdmPath(): Promise<boolean> {
+	const binDir = path.dirname(WINDOWS_MDM_OPENGREP);
 
 	try {
-		// Fetch latest release info from GitHub API
-		const releaseInfo = await httpGetJson('https://api.github.com/repos/opengrep/opengrep/releases/latest');
-		if (!releaseInfo || !releaseInfo.assets) { return false; }
+		// Fetch latest release from GitHub API
+		const releaseData = await httpGetJson('https://api.github.com/repos/opengrep/opengrep/releases/latest');
+		if (!releaseData || !releaseData.assets) { return false; }
 
-		// Find the Windows binary asset
-		const asset = (releaseInfo.assets as Array<{ name: string; browser_download_url: string }>).find(
-			a => /windows.*\.exe$/i.test(a.name) && !/\.(cert|sig)$/i.test(a.name)
+		// Find Windows binary (same logic as mdm-install.ps1: "opengrep_windows_x86.exe")
+		const assets = releaseData.assets as Array<{ name: string; browser_download_url: string }>;
+		const asset = assets.find(a =>
+			a.name === 'opengrep_windows_x86.exe' ||
+			(/windows.*\.exe$/i.test(a.name) && !/\.(cert|sig)$/i.test(a.name))
 		);
 
 		if (!asset) {
@@ -360,58 +339,23 @@ async function downloadOpenGrepBinary(): Promise<boolean> {
 			return false;
 		}
 
-		// Ensure target directory exists
+		// Ensure directory exists
 		if (!fs.existsSync(binDir)) {
 			fs.mkdirSync(binDir, { recursive: true });
 		}
 
-		// Download the binary
-		await httpDownloadFile(asset.browser_download_url, binPath);
+		// Download
+		await httpDownloadFile(asset.browser_download_url, WINDOWS_MDM_OPENGREP);
 
-		// Verify the downloaded file is functional
+		// Verify it works
 		try {
-			await execFileAsync(binPath, ['--version'], { encoding: 'utf-8', timeout: 10000 });
+			await execFileAsync(WINDOWS_MDM_OPENGREP, ['--version'], { encoding: 'utf-8', timeout: 10000 });
 		} catch {
-			// Downloaded file is not functional — remove it
-			try { fs.unlinkSync(binPath); } catch { /* */ }
+			try { fs.unlinkSync(WINDOWS_MDM_OPENGREP); } catch { /* */ }
 			return false;
 		}
 
-		// Add to system PATH (best effort — may fail without admin rights)
-		try {
-			const sysPath = await execFileAsync('powershell', [
-				'-NoProfile', '-Command',
-				`[Environment]::GetEnvironmentVariable('PATH', 'Machine')`,
-			], { encoding: 'utf-8', timeout: 5000 });
-
-			if (!sysPath.stdout.includes(binDir)) {
-				await execFileAsync('powershell', [
-					'-NoProfile', '-Command',
-					`[Environment]::SetEnvironmentVariable('PATH', [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';${binDir}', 'Machine')`,
-				], { encoding: 'utf-8', timeout: 5000 });
-			}
-		} catch {
-			// Fallback: add to user PATH if system PATH fails (no admin)
-			try {
-				const userPath = await execFileAsync('powershell', [
-					'-NoProfile', '-Command',
-					`[Environment]::GetEnvironmentVariable('PATH', 'User')`,
-				], { encoding: 'utf-8', timeout: 5000 });
-
-				if (!userPath.stdout.includes(binDir)) {
-					await execFileAsync('powershell', [
-						'-NoProfile', '-Command',
-						`[Environment]::SetEnvironmentVariable('PATH', [Environment]::GetEnvironmentVariable('PATH', 'User') + ';${binDir}', 'User')`,
-					], { encoding: 'utf-8', timeout: 5000 });
-				}
-			} catch {
-				console.warn('[Hotmart AppSec] Could not add opengrep to PATH (no admin rights)');
-			}
-		}
-
-		// Set the resolved path immediately (IDE won't see PATH until restart)
-		_opengrepBinaryPath = binPath;
-		console.log(`[Hotmart AppSec] OpenGrep downloaded to ${binPath}`);
+		console.log(`[Hotmart AppSec] OpenGrep downloaded to ${WINDOWS_MDM_OPENGREP}`);
 		return true;
 	} catch (err) {
 		console.error('[Hotmart AppSec] OpenGrep download failed:', err);
@@ -420,27 +364,20 @@ async function downloadOpenGrepBinary(): Promise<boolean> {
 }
 
 /**
- * Simple HTTPS GET returning parsed JSON. Used for GitHub API.
+ * Simple HTTPS GET returning parsed JSON (for GitHub API).
  */
 function httpGetJson(url: string): Promise<Record<string, unknown> | null> {
+	const https = require('https');
 	return new Promise((resolve) => {
-		const req = https.get(url, { headers: { 'User-Agent': 'HotmartAppSec-Extension' } }, (res) => {
-			// Follow redirects (GitHub API may redirect)
+		const req = https.get(url, { headers: { 'User-Agent': 'HotmartAppSec-Extension' } }, (res: { statusCode?: number; headers: Record<string, string>; on: Function }) => {
 			if (res.statusCode === 301 || res.statusCode === 302) {
-				const redirectUrl = res.headers.location;
-				if (redirectUrl) {
-					httpGetJson(redirectUrl).then(resolve);
-					return;
-				}
+				const redirect = res.headers.location;
+				if (redirect) { httpGetJson(redirect).then(resolve); return; }
 			}
 			if (res.statusCode !== 200) { resolve(null); return; }
-
 			let data = '';
-			res.on('data', chunk => { data += chunk; });
-			res.on('end', () => {
-				try { resolve(JSON.parse(data)); }
-				catch { resolve(null); }
-			});
+			res.on('data', (chunk: string) => { data += chunk; });
+			res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(null); } });
 		});
 		req.on('error', () => resolve(null));
 		req.setTimeout(30000, () => { req.destroy(); resolve(null); });
@@ -448,65 +385,48 @@ function httpGetJson(url: string): Promise<Record<string, unknown> | null> {
 }
 
 /**
- * Downloads a file from a URL (follows redirects). Used for binary downloads.
+ * Downloads a file from URL (follows redirects).
  */
 function httpDownloadFile(url: string, destPath: string): Promise<void> {
+	const https = require('https');
 	return new Promise((resolve, reject) => {
-		const makeRequest = (targetUrl: string, redirectsLeft: number) => {
-			const parsedUrl = new URL(targetUrl);
-			const options = {
-				hostname: parsedUrl.hostname,
-				path: parsedUrl.pathname + parsedUrl.search,
-				headers: { 'User-Agent': 'HotmartAppSec-Extension' },
-			};
-
-			const req = https.get(options, (res) => {
-				if ((res.statusCode === 301 || res.statusCode === 302) && redirectsLeft > 0) {
-					const redirectUrl = res.headers.location;
-					if (redirectUrl) {
-						makeRequest(redirectUrl, redirectsLeft - 1);
-						return;
-					}
+		const makeReq = (targetUrl: string, redirects: number) => {
+			const parsed = new URL(targetUrl);
+			https.get({ hostname: parsed.hostname, path: parsed.pathname + parsed.search, headers: { 'User-Agent': 'HotmartAppSec-Extension' } }, (res: { statusCode?: number; headers: Record<string, string>; pipe: Function }) => {
+				if ((res.statusCode === 301 || res.statusCode === 302) && redirects > 0) {
+					const r = res.headers.location;
+					if (r) { makeReq(r, redirects - 1); return; }
 				}
-				if (res.statusCode !== 200) {
-					reject(new Error(`HTTP ${res.statusCode}`));
-					return;
-				}
-
+				if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return; }
 				const file = fs.createWriteStream(destPath);
 				res.pipe(file);
 				file.on('finish', () => { file.close(); resolve(); });
-				file.on('error', (err) => {
-					try { fs.unlinkSync(destPath); } catch { /* */ }
-					reject(err);
-				});
-			});
-			req.on('error', reject);
-			req.setTimeout(120000, () => { req.destroy(); reject(new Error('Timeout')); });
+				file.on('error', (e: Error) => { try { fs.unlinkSync(destPath); } catch { /* */ } reject(e); });
+			}).on('error', reject);
 		};
-
-		makeRequest(url, 5);
+		makeReq(url, 5);
 	});
 }
 
 /**
- * Ensures OpenGrep is available. Installs if needed.
- * Respects a 24h cooldown between install attempts to avoid spamming the user.
+ * Ensures OpenGrep is available. On Windows, checks MDM path then installs if needed.
+ * On macOS/Linux, installs if needed. Respects cooldown.
  */
 export async function ensureOpenGrep(): Promise<boolean> {
 	if (await checkOpenGrepAsync()) {
 		return true;
 	}
 
-	// If we already tried installing recently and it failed, don't try again
+	// If we already tried recently and failed, don't spam the user
 	if (isInstallOnCooldown()) {
-		console.log('[Hotmart AppSec] OpenGrep install on cooldown — skipping automatic install');
+		console.log('[Hotmart AppSec] OpenGrep install on cooldown — skipping');
 		return false;
 	}
 
-	// Install silently without asking
 	return await installOpenGrep();
 }
+
+// ─── OPENGREP SCAN LOGIC ─────────────────────────────────────────────────────
 
 /**
  * Maps OpenGrep severity to our severity type.
@@ -547,21 +467,19 @@ function formatTitle(checkId: string): string {
 
 /**
  * Normalizes an OpenGrep check_id by stripping the machine-specific path prefix.
- * Input:  "Users.leandro.andrade..kiro.extensions.hotmartcybersecurity.cybersecurityextension-0.8.4-universal.rules.dockerfile-run-as-root"
- * Output: "rules.dockerfile-run-as-root"
  */
 function normalizeCheckId(checkId: string): string {
 	const marker = '.rules.';
 	const idx = checkId.indexOf(marker);
 	if (idx !== -1) {
-		return checkId.substring(idx + 1); // includes "rules."
+		return checkId.substring(idx + 1);
 	}
 	return checkId;
 }
 
 /**
  * Runs OpenGrep on the specified files and returns findings.
- * Fully async — does not block the extension host thread.
+ * Uses the resolved binary path (MDM path on Windows, PATH on macOS/Linux).
  */
 export async function runOpenGrep(files: string[], workspaceFolder: string, extensionPath: string): Promise<SecurityFinding[]> {
 	if (files.length === 0) {
@@ -575,7 +493,6 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 	const findings: SecurityFinding[] = [];
 
 	try {
-		// Build absolute file paths — filter out files that no longer exist on disk.
 		const filePaths = files
 			.map(f => path.join(workspaceFolder, f))
 			.filter(f => fs.existsSync(f));
@@ -600,7 +517,6 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 			return findings;
 		}
 
-		// Run opengrep asynchronously with argv array (safe for paths with special chars)
 		const args = ['scan', '--json', '--quiet', `--config=${rulesPath}`, ...filePaths];
 
 		let output: string;
@@ -674,10 +590,7 @@ export async function runOpenGrep(files: string[], workspaceFolder: string, exte
 		console.error('OpenGrep parse error:', err);
 	}
 
-	// Deduplicate findings with same CWE on the same file:line
 	const deduped = deduplicateFindings(findings);
-
-	// Filter out dismissed/fixed findings
 	const filtered = filterDismissedFindings(deduped, workspaceFolder);
 
 	return sortBySeverity(filtered);
@@ -702,7 +615,6 @@ function filterDismissedFindings(findings: SecurityFinding[], workspaceFolder: s
 	const dismissedKeys = new Set<string>();
 	for (const d of dismissed) {
 		const ruleId = normalizeCheckId(d.id);
-		// Match by rule+file+line (exact) and rule+file (any line)
 		dismissedKeys.add(`${ruleId}:${d.file}:${d.line}`);
 		dismissedKeys.add(`${ruleId}:${d.file}:0`);
 	}
@@ -716,7 +628,6 @@ function filterDismissedFindings(findings: SecurityFinding[], workspaceFolder: s
 
 /**
  * Removes duplicate findings that share the same CWE and location (file + line).
- * Keeps the finding with highest severity (or first occurrence if equal).
  */
 function deduplicateFindings(findings: SecurityFinding[]): SecurityFinding[] {
 	const seen = new Map<string, SecurityFinding>();
