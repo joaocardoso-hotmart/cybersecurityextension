@@ -262,14 +262,11 @@ export async function installOpenGrep(): Promise<boolean> {
 			cancellable: false,
 		},
 		async (progress) => {
-			// 1. Official install script
+			// 1. Download binary directly from GitHub Releases (avoids curl|bash supply chain risk)
 			try {
 				progress.report({ message: 'Baixando binário...' });
-				await execFileAsync('bash', ['-c', 'curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash'], {
-					encoding: 'utf-8',
-					timeout: 120000,
-				});
-				return true;
+				const downloaded = await downloadOpenGrepUnix();
+				if (downloaded) { return true; }
 			} catch { /* */ }
 
 			// 2. Homebrew (macOS)
@@ -316,6 +313,70 @@ export async function installOpenGrep(): Promise<boolean> {
 }
 
 /**
+ * Downloads OpenGrep binary for macOS/Linux from GitHub Releases.
+ * Installs to ~/.local/bin/opengrep (user-writable, no sudo required).
+ */
+async function downloadOpenGrepUnix(): Promise<boolean> {
+	const releaseData = await httpGetJson('https://api.github.com/repos/opengrep/opengrep/releases/latest');
+	if (!releaseData || !releaseData.assets) { return false; }
+
+	const assets = releaseData.assets as Array<{ name: string; browser_download_url: string }>;
+
+	const platformPattern = process.platform === 'darwin'
+		? /macos|darwin/i
+		: /linux/i;
+
+	const asset = assets.find(a =>
+		platformPattern.test(a.name) &&
+		!/\.(cert|sig|sha256)$/i.test(a.name)
+	);
+
+	if (!asset) { return false; }
+
+	if (!isTrustedDownloadUrl(asset.browser_download_url)) {
+		console.error(`[Hotmart AppSec] Untrusted download URL rejected: ${asset.browser_download_url}`);
+		return false;
+	}
+
+	const homeDir = process.env.HOME || '';
+	const binDir = path.join(homeDir, '.local', 'bin');
+	const destPath = path.join(binDir, 'opengrep');
+
+	if (!fs.existsSync(binDir)) {
+		fs.mkdirSync(binDir, { recursive: true });
+	}
+
+	await httpDownloadFile(asset.browser_download_url, destPath);
+	fs.chmodSync(destPath, 0o755);
+
+	try {
+		await execFileAsync(destPath, ['--version'], { encoding: 'utf-8', timeout: 10000 });
+	} catch {
+		try { fs.unlinkSync(destPath); } catch { /* */ }
+		return false;
+	}
+
+	_opengrepBinaryPath = destPath;
+	addToProcessPath(binDir);
+	return true;
+}
+
+/**
+ * Trusted origins for OpenGrep release asset downloads.
+ * Only URLs starting with these prefixes are allowed (prevents SSRF from a
+ * tampered GitHub API response redirecting to an internal host).
+ */
+const TRUSTED_DOWNLOAD_ORIGINS = [
+	'https://github.com/',
+	'https://objects.githubusercontent.com/',
+	'https://releases.githubusercontent.com/',
+];
+
+function isTrustedDownloadUrl(url: string): boolean {
+	return TRUSTED_DOWNLOAD_ORIGINS.some(origin => url.startsWith(origin));
+}
+
+/**
  * Downloads OpenGrep binary from GitHub Releases to the MDM path.
  * Same approach the deploy/windows/mdm-install.ps1 uses.
  */
@@ -336,6 +397,12 @@ async function downloadOpenGrepToMdmPath(): Promise<boolean> {
 
 		if (!asset) {
 			console.log('[Hotmart AppSec] No Windows binary found in latest OpenGrep release');
+			return false;
+		}
+
+		// Validate download URL to prevent SSRF from a tampered API response (CWE-918)
+		if (!isTrustedDownloadUrl(asset.browser_download_url)) {
+			console.error(`[Hotmart AppSec] Untrusted download URL rejected: ${asset.browser_download_url}`);
 			return false;
 		}
 
