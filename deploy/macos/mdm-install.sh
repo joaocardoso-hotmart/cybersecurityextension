@@ -3,8 +3,8 @@
 # AppSec MDM Installer — Hotmart Cybersecurity Extension (self-contained)
 # =============================================================================
 # Single-file installer. No external dependencies beyond this script.
-# Installs the extension from the marketplace and writes all config files
-# inline — no standards/ folder or .vsix required.
+# Installs the extension from a bundled .vsix file distributed via MDM.
+# No marketplace dependency — fully offline capable.
 #
 # Supported IDEs: Kiro, VS Code, Cursor, Claude Code
 #
@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-EXTENSION_ID="HotmartCybersecurity.cybersecurityextension"
+VSIX_PATH="/Library/Application Support/Hotmart/appsec/extension.vsix"
 
 R='\033[31m'; G='\033[32m'; Y='\033[33m'; B='\033[1m'; N='\033[0m'; D='\033[2m'
 INSTALLED=(); SKIPPED=(); FAILED=()
@@ -68,31 +68,74 @@ write_file() {
 }
 
 # ---------------------------------------------------------------------------
-# Install extension from marketplace (no .vsix needed)
+# Install extension from bundled .vsix (no marketplace dependency)
 # Runs as the real user (not root) to install in the correct home
 # ---------------------------------------------------------------------------
 
-# Fingerprint SHA-256 do Zscaler Root CA corporativo (Hotmart)
-# Supply chain protection: só confia neste certificado específico, não em todo o Keychain
+install_extension() {
+  local cli="$1" label="$2"
+  [ -x "$cli" ] || return
+
+  if [ ! -f "$VSIX_PATH" ]; then
+    log "  [ERROR] Bundled .vsix not found at: $VSIX_PATH"
+    fail "$label (vsix not found)"
+    return
+  fi
+
+  local real_user real_home
+  real_user="$(stat -f '%Su' /dev/console 2>/dev/null || echo "")"
+  real_home="$(dscl . -read "/Users/$real_user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+
+  local env_cmd="env HOME=$real_home"
+
+  log "  [DEBUG] Installing from bundled .vsix, Running as $real_user (HOME=$real_home): $cli --install-extension"
+
+  # Executar instalação
+  if [ "$(id -u)" = "0" ] && [ -n "$real_user" ] && [ "$real_user" != "root" ] && [ -n "$real_home" ]; then
+    # Rodando como root — executar como console user
+    local already_installed=""
+    already_installed="$(sudo -H -u "$real_user" $env_cmd "$cli" --list-extensions 2>/dev/null | grep -i "HotmartCybersecurity" || true)"
+
+    if [ -n "$already_installed" ]; then
+      sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$VSIX_PATH" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+        && ok "$label (updated via vsix)" \
+        || { log "  [ERROR] $label install failed — see appsec-install-detail.log"; fail "$label"; }
+    else
+      sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$VSIX_PATH" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+        && ok "$label (installed via vsix)" \
+        || { log "  [ERROR] $label install failed — see appsec-install-detail.log"; fail "$label"; }
+    fi
+  else
+    # Rodando como user normal
+    if "$cli" --list-extensions 2>/dev/null | grep -qi "HotmartCybersecurity"; then
+      "$cli" --install-extension "$VSIX_PATH" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+        && ok "$label (updated)" || { log "  [ERROR] $label update failed"; fail "$label"; }
+    else
+      "$cli" --install-extension "$VSIX_PATH" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
+        && ok "$label (installed)" || { log "  [ERROR] $label install failed"; fail "$label"; }
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Certificate pinning for corporate proxy (Zscaler)
+# Required for any HTTPS download (opengrep, GitHub API, etc.)
+# ---------------------------------------------------------------------------
 TRUSTED_PROXY_CA_FINGERPRINT="04:F6:1F:1D:13:AA:E1:D1:65:73:DC:2C:37:F7:96:FD:F4:AC:97:71:3A:69:59:EB:B1:1D:24:73:95:8B:1A:53"
 TRUSTED_PROXY_CA_CN="Zscaler Root CA"
 
-# Exporta APENAS o certificado confiável do Keychain, validando fingerprint
 get_trusted_ca_certs() {
   local ca_certs="/tmp/appsec-trusted-ca.pem"
   local cert_pem fingerprint
 
-  # Extrair o certificado pelo CN específico
   cert_pem="$(security find-certificate -a -c "$TRUSTED_PROXY_CA_CN" -p /Library/Keychains/System.keychain 2>/dev/null)"
 
   if [ -z "$cert_pem" ]; then
-    # Log para stderr (não stdout) porque esta função é chamada via $()
     echo "[AppSec]   [INFO] No corporate proxy CA found — skipping (direct internet)" >&2
     echo ""
     return
   fi
 
-  # Verificar fingerprint (certificate pinning)
   fingerprint="$(echo "$cert_pem" | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)"
 
   if [ "$fingerprint" != "$TRUSTED_PROXY_CA_FINGERPRINT" ]; then
@@ -102,91 +145,9 @@ get_trusted_ca_certs() {
     return
   fi
 
-  # Fingerprint válido — exportar
   printf '%s\n' "$cert_pem" > "$ca_certs"
   chmod 644 "$ca_certs"
   echo "$ca_certs"
-}
-
-install_extension() {
-  local cli="$1" label="$2"
-  [ -x "$cli" ] || return
-
-  local real_user real_home
-  real_user="$(stat -f '%Su' /dev/console 2>/dev/null || echo "")"
-  real_home="$(dscl . -read "/Users/$real_user" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-
-  # Exportar APENAS o certificado corporativo validado por fingerprint
-  local ca_certs
-  ca_certs="$(get_trusted_ca_certs)"
-
-  # Montar env_cmd para execução como console user
-  local env_cmd="env HOME=$real_home"
-  [ -n "$ca_certs" ] && env_cmd="$env_cmd NODE_EXTRA_CA_CERTS=$ca_certs"
-
-  # Determinar método de instalação:
-  # 1. Bundled .vsix (funciona offline, sem TLS — ideal para Kiro + Zscaler)
-  # 2. Marketplace (requer internet + TLS — funciona para VS Code/Cursor sem proxy)
-  local vsix_path="/Library/Application Support/Hotmart/appsec/extension.vsix"
-  local install_source="$EXTENSION_ID"
-  local install_method="marketplace"
-
-  if [ -f "$vsix_path" ]; then
-    install_source="$vsix_path"
-    install_method="vsix"
-  fi
-
-  log "  [DEBUG] Method=$install_method, Running as $real_user (HOME=$real_home): $cli --install-extension"
-
-  # Executar instalação
-  if [ "$(id -u)" = "0" ] && [ -n "$real_user" ] && [ "$real_user" != "root" ] && [ -n "$real_home" ]; then
-    # Rodando como root — executar como console user
-    local already_installed=""
-    already_installed="$(sudo -H -u "$real_user" $env_cmd "$cli" --list-extensions 2>/dev/null | grep -i "HotmartCybersecurity" || true)"
-
-    if [ -n "$already_installed" ]; then
-      sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$install_source" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
-        && ok "$label (updated via $install_method)" \
-        || {
-          # Se marketplace falhou, tenta .vsix como fallback
-          if [ "$install_method" = "marketplace" ] && [ -f "$vsix_path" ]; then
-            log "  [WARN] Marketplace failed, trying bundled .vsix..."
-            sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$vsix_path" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
-              && ok "$label (updated via vsix fallback)" \
-              || { log "  [ERROR] $label install failed"; fail "$label"; }
-          else
-            log "  [ERROR] $label install failed — see appsec-install-detail.log"; fail "$label"
-          fi
-        }
-    else
-      sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$install_source" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
-        && ok "$label (installed via $install_method)" \
-        || {
-          # Se marketplace falhou, tenta .vsix como fallback
-          if [ "$install_method" = "marketplace" ] && [ -f "$vsix_path" ]; then
-            log "  [WARN] Marketplace failed, trying bundled .vsix..."
-            sudo -H -u "$real_user" $env_cmd "$cli" --install-extension "$vsix_path" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
-              && ok "$label (installed via vsix fallback)" \
-              || { log "  [ERROR] $label install failed"; fail "$label"; }
-          else
-            log "  [ERROR] $label install failed — see appsec-install-detail.log"; fail "$label"
-          fi
-        }
-    fi
-  else
-    # Rodando como user normal
-    [ -n "$ca_certs" ] && export NODE_EXTRA_CA_CERTS="$ca_certs"
-    if "$cli" --list-extensions 2>/dev/null | grep -qi "HotmartCybersecurity"; then
-      "$cli" --install-extension "$install_source" --force >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
-        && ok "$label (updated)" || { log "  [ERROR] $label update failed"; fail "$label"; }
-    else
-      "$cli" --install-extension "$install_source" >> /Library/Logs/Hotmart/appsec-install-detail.log 2>&1 \
-        && ok "$label (installed)" || { log "  [ERROR] $label install failed"; fail "$label"; }
-    fi
-  fi
-
-  # Cleanup
-  [ -f "/tmp/appsec-trusted-ca.pem" ] && rm -f "/tmp/appsec-trusted-ca.pem"
 }
 
 # ---------------------------------------------------------------------------
@@ -219,15 +180,21 @@ install_opengrep() {
   fi
 
   # 3. Último recurso: download com verificação de checksum
+  # Exportar CA corporativo para curl funcionar atrás do Zscaler
+  local ca_certs
+  ca_certs="$(get_trusted_ca_certs)"
+  local curl_ca_opt=""
+  [ -n "$ca_certs" ] && curl_ca_opt="--cacert $ca_certs"
+
   local tmp_dir; tmp_dir="$(mktemp -d)"
   local arch; arch="$(uname -m)"
-  # Map arch: arm64 -> arm64, x86_64 -> x86
   local og_arch="arm64"
   [ "$arch" = "x86_64" ] && og_arch="x86"
 
-  local release_json; release_json="$(curl -fsSL --connect-timeout 10 "https://api.github.com/repos/opengrep/opengrep/releases/latest" 2>/dev/null)" || {
+  local release_json; release_json="$(curl -fsSL $curl_ca_opt --connect-timeout 10 "https://api.github.com/repos/opengrep/opengrep/releases/latest" 2>/dev/null)" || {
     fail "opengrep (sem binário bundled e sem internet)"
     rm -rf "$tmp_dir"
+    [ -f "/tmp/appsec-trusted-ca.pem" ] && rm -f "/tmp/appsec-trusted-ca.pem"
     return
   }
 
@@ -244,10 +211,11 @@ for a in data.get('assets', []):
   if [ -z "$download_url" ]; then
     fail "opengrep (não encontrou release para osx/${og_arch})"
     rm -rf "$tmp_dir"
+    [ -f "/tmp/appsec-trusted-ca.pem" ] && rm -f "/tmp/appsec-trusted-ca.pem"
     return
   fi
 
-  curl -fsSL -o "$tmp_dir/opengrep" "$download_url" 2>/dev/null
+  curl -fsSL $curl_ca_opt -o "$tmp_dir/opengrep" "$download_url" 2>/dev/null
 
   chmod +x "$tmp_dir/opengrep"
   mv "$tmp_dir/opengrep" /usr/local/bin/opengrep 2>/dev/null || {
@@ -255,6 +223,7 @@ for a in data.get('assets', []):
     mv "$tmp_dir/opengrep" "$HOME/.local/bin/opengrep"
   }
   rm -rf "$tmp_dir"
+  [ -f "/tmp/appsec-trusted-ca.pem" ] && rm -f "/tmp/appsec-trusted-ca.pem"
 
   command -v opengrep &>/dev/null && ok "opengrep (downloaded)" || fail "opengrep (install failed)"
 }

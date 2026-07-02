@@ -5,8 +5,8 @@
 
 .DESCRIPTION
     Self-contained installer. No external dependencies beyond this script.
-    Installs the extension from the marketplace and writes all config files
-    inline — no standards/ folder or .vsix required.
+    Installs the extension from a bundled .vsix file distributed via MDM.
+    No marketplace dependency — fully offline capable.
 
     Supported IDEs: Kiro, VS Code, Cursor, Windsurf, Claude Code
 
@@ -17,11 +17,7 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Continue"
 
-$EXTENSION_ID = "HotmartCybersecurity.cybersecurityextension"
-
-# ── Supply chain protection: Zscaler Root CA fingerprint ──────────────────
-$TRUSTED_PROXY_CA_THUMBPRINT = "04F61F1D13AAE1D16573DC2C37F796FDF4AC97713A6959EBB11D2473958B1A53"
-$TRUSTED_PROXY_CA_CN = "Zscaler Root CA"
+$VSIX_PATH = "C:\ProgramData\Hotmart\appsec\extension.vsix"
 
 # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -45,6 +41,48 @@ function Write-Section([string]$Title) { Write-Host "`n>>> $Title" -ForegroundCo
 function Write-Ok([string]$Label)   { Write-Host "  [OK] $Label" -ForegroundColor Green; $Installed.Add($Label) }
 function Write-Skip([string]$Label) { Write-Host "  [--] $Label" -ForegroundColor DarkGray; $Skipped.Add($Label) }
 function Write-Fail([string]$Label) { Write-Host "  [XX] $Label" -ForegroundColor Red; $Failed.Add($Label) }
+
+# ── Extension Installation (bundled .vsix only) ───────────────────────────
+
+function Install-Extension([string]$Cli, [string]$Label) {
+    if (-not (Test-Path $Cli)) { return }
+
+    if (-not (Test-Path $VSIX_PATH)) {
+        Write-Fail "$Label (vsix not found at $VSIX_PATH)"
+        Write-Log "  [ERROR] $Label : bundled .vsix not found at $VSIX_PATH"
+        return
+    }
+
+    try {
+        Write-Log "  Installing $Label via $Cli from bundled .vsix"
+
+        $listOutput = & $Cli --list-extensions 2>$null
+        $existing = $listOutput | Where-Object { $_ -ilike "*HotmartCybersecurity*" }
+
+        if ($existing) {
+            $output = & $Cli --install-extension $VSIX_PATH --force 2>&1
+            "$output" | Add-Content -Path $DetailLog -Encoding UTF8
+            if ($LASTEXITCODE -eq 0 -or "$output" -match "successfully") {
+                Write-Ok "$Label (updated via vsix)"
+            } else {
+                Write-Fail "$Label (update failed)"
+                Write-Log "  [ERROR] $Label update: $output"
+            }
+        } else {
+            $output = & $Cli --install-extension $VSIX_PATH 2>&1
+            "$output" | Add-Content -Path $DetailLog -Encoding UTF8
+            if ($LASTEXITCODE -eq 0 -or "$output" -match "successfully") {
+                Write-Ok "$Label (installed via vsix)"
+            } else {
+                Write-Fail "$Label (install failed)"
+                Write-Log "  [ERROR] $Label install: $output"
+            }
+        }
+    } catch {
+        Write-Fail "$Label ($_)"
+        Write-Log "  [ERROR] $Label : $_"
+    }
+}
 
 # ── User Detection ────────────────────────────────────────────────────────
 
@@ -95,7 +133,10 @@ function Get-ConsoleUserHome {
     return $null
 }
 
-# ── Certificate Pinning ───────────────────────────────────────────────────
+# ── Certificate Pinning (for HTTPS downloads behind Zscaler proxy) ────────
+
+$TRUSTED_PROXY_CA_THUMBPRINT = "04F61F1D13AAE1D16573DC2C37F796FDF4AC97713A6959EBB11D2473958B1A53"
+$TRUSTED_PROXY_CA_CN = "Zscaler Root CA"
 
 function Get-TrustedCaCerts {
     $cert = Get-ChildItem -Path Cert:\LocalMachine\Root |
@@ -124,50 +165,6 @@ function Get-TrustedCaCerts {
     return $pemPath
 }
 
-# ── Extension Installation ────────────────────────────────────────────────
-
-function Install-Extension([string]$Cli, [string]$Label) {
-    if (-not (Test-Path $Cli)) { return }
-
-    $caPem = Get-TrustedCaCerts
-
-    try {
-        Write-Log "  Installing $Label via $Cli"
-        if ($caPem) { $env:NODE_EXTRA_CA_CERTS = $caPem }
-
-        $listOutput = & $Cli --list-extensions 2>$null
-        $existing = $listOutput | Where-Object { $_ -ilike "*HotmartCybersecurity*" }
-
-        if ($existing) {
-            $output = & $Cli --install-extension $EXTENSION_ID --force 2>&1
-            "$output" | Add-Content -Path $DetailLog -Encoding UTF8
-            if ($LASTEXITCODE -eq 0 -or "$output" -match "successfully") {
-                Write-Ok "$Label (updated)"
-            } else {
-                Write-Fail "$Label (update failed)"
-                Write-Log "  [ERROR] $Label update: $output"
-            }
-        } else {
-            $output = & $Cli --install-extension $EXTENSION_ID 2>&1
-            "$output" | Add-Content -Path $DetailLog -Encoding UTF8
-            if ($LASTEXITCODE -eq 0 -or "$output" -match "successfully") {
-                Write-Ok "$Label (installed)"
-            } else {
-                Write-Fail "$Label (install failed)"
-                Write-Log "  [ERROR] $Label install: $output"
-            }
-        }
-    } catch {
-        Write-Fail "$Label ($_)"
-        Write-Log "  [ERROR] $Label : $_"
-    } finally {
-        if ($caPem) {
-            Remove-Item $caPem -Force -ErrorAction SilentlyContinue
-            $env:NODE_EXTRA_CA_CERTS = $null
-        }
-    }
-}
-
 # ── Opengrep Installation ────────────────────────────────────────────────
 
 function Install-OpenGrep {
@@ -194,8 +191,11 @@ function Install-OpenGrep {
         if (Test-Path "$binDir\opengrep.exe") { Write-Ok "opengrep (bundled)"; return }
     }
 
-    # 2. Download from GitHub
+    # 2. Download from GitHub (with corporate proxy CA support)
+    $caPem = Get-TrustedCaCerts
     try {
+        if ($caPem) { $env:NODE_EXTRA_CA_CERTS = $caPem }
+
         $api = Invoke-RestMethod "https://api.github.com/repos/opengrep/opengrep/releases/latest" -UseBasicParsing -TimeoutSec 15
         $asset = $api.assets | Where-Object { $_.name -eq "opengrep_windows_x86.exe" } | Select-Object -First 1
         if ($asset) {
@@ -210,7 +210,12 @@ function Install-OpenGrep {
             Write-Ok "opengrep (downloaded)"
             return
         }
-    } catch {}
+    } catch {} finally {
+        if ($caPem) {
+            Remove-Item $caPem -Force -ErrorAction SilentlyContinue
+            $env:NODE_EXTRA_CA_CERTS = $null
+        }
+    }
 
     Write-Fail "opengrep (install failed — no bundled binary and no internet)"
 }
