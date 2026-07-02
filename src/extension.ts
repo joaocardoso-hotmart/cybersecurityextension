@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as https from 'https';
 import { execFile, execSync } from 'child_process';
 import { promisify } from 'util';
 import { SecuritySidebarProvider } from './sidebar';
@@ -254,8 +253,6 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
-	// Check for newer version in the marketplace and alert the user
-	checkForExtensionUpdate(context);
 }
 
 /**
@@ -1701,8 +1698,8 @@ async function bootstrapProject(context: vscode.ExtensionContext): Promise<void>
 	// Install preToolUse hooks only for the detected IDE
 	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
 
-	// Clean up any locally-installed workflow (now centralized in GitHub Actions)
-	cleanupLocalWorkflow(workspaceFolder);
+	// Install AppSec GitHub Actions workflow for PR validation
+	installAppsecWorkflow(context, workspaceFolder, false);
 
 	if (applied > 0) {
 		vscode.window.showInformationMessage(
@@ -1730,8 +1727,8 @@ async function updateStandards(context: vscode.ExtensionContext): Promise<void> 
 	// Always update Claude rules
 	updated += await applyClaudeFiles(context, workspaceFolder, true);
 
-	// Clean up any locally-installed workflow (now centralized in GitHub Actions)
-	cleanupLocalWorkflow(workspaceFolder);
+	// Install AppSec GitHub Actions workflow for PR validation
+	installAppsecWorkflow(context, workspaceFolder, true);
 
 	if (updated > 0) {
 		vscode.window.showInformationMessage(`[Hotmart AppSec] ✅ Padrões corporativos atualizados: ${updated} arquivo(s) sincronizado(s) para ${detectIDE()}. 🔄`);
@@ -1829,8 +1826,8 @@ async function applyToAllTargets(context: vscode.ExtensionContext, workspaceFold
 	// Install security hooks only for the current IDE
 	applied += await applySecurityHooks(context, workspaceFolder, [currentIde]);
 
-	// Clean up any locally-installed workflow (now centralized in GitHub Actions)
-	cleanupLocalWorkflow(workspaceFolder);
+	// Install AppSec GitHub Actions workflow for PR validation
+	installAppsecWorkflow(context, workspaceFolder, force);
 
 	if (!silent && applied > 0) {
 		vscode.window.showInformationMessage(`[Hotmart AppSec] ✅ Padrões de segurança corporativa aplicados: ${applied} arquivo(s) para ${currentIde}. 🎯`);
@@ -1981,38 +1978,45 @@ async function installClaudeHook(context: vscode.ExtensionContext, workspaceFold
 // ─── GITHUB WORKFLOW ──────────────────────────────────────────────────────────
 
 /**
- * Removes locally-installed workflow files that were deployed by previous versions
- * of this extension. Starting from v0.9.4, the GitHub Actions workflow is managed
- * centrally (committed directly to repos or via org-level workflow) and MUST NOT
- * be installed by the extension to avoid conflicts.
+ * Installs the AppSec GitHub Actions workflow into the workspace.
+ * This workflow references the internal Hotmart-Org/actions/appsec action
+ * to validate security rules on every PR.
  *
- * Cleans up: appsec-guard.yml and legacy ci-cd.yml.
+ * Only installs if the workspace has a .git directory (is a git repo).
+ * Removes legacy ci-cd.yml if present.
  */
-function cleanupLocalWorkflow(workspaceFolder: string): void {
+function installAppsecWorkflow(context: vscode.ExtensionContext, workspaceFolder: string, force: boolean): void {
+	// Only install in git repos
+	const gitDir = path.join(workspaceFolder, '.git');
+	if (!fs.existsSync(gitDir)) { return; }
+
 	const targetDir = path.join(workspaceFolder, '.github', 'workflows');
-	if (!fs.existsSync(targetDir)) { return; }
+	const targetFile = path.join(targetDir, 'appsec-guard.yml');
 
-	const LEGACY_WORKFLOWS = ['appsec-guard.yml', 'ci-cd.yml'];
-
-	for (const fileName of LEGACY_WORKFLOWS) {
-		const filePath = path.join(targetDir, fileName);
-		try {
-			if (fs.existsSync(filePath)) {
-				fs.unlinkSync(filePath);
-				console.log(`[Hotmart AppSec] Removed local workflow (now centralized in GitHub Actions): ${filePath}`);
-			}
-		} catch (err) {
-			console.warn(`[Hotmart AppSec] Could not remove local workflow ${fileName}:`, err);
-		}
-	}
-
-	// Remove empty .github/workflows directory
+	// Remove legacy ci-cd.yml if present
+	const legacyCiCd = path.join(targetDir, 'ci-cd.yml');
 	try {
-		if (fs.existsSync(targetDir) && fs.readdirSync(targetDir).length === 0) {
-			fs.rmdirSync(targetDir);
-			console.log(`[Hotmart AppSec] Removed empty workflows dir: ${targetDir}`);
+		if (fs.existsSync(legacyCiCd)) {
+			fs.unlinkSync(legacyCiCd);
+			console.log(`[Hotmart AppSec] Removed legacy workflow: ${legacyCiCd}`);
 		}
 	} catch { /* best effort */ }
+
+	// Install or update the workflow
+	if (fs.existsSync(targetFile) && !force) { return; }
+
+	const sourceFile = path.join(context.extensionPath, 'standards', 'org-workflow', 'appsec-guard.yml');
+	if (!fs.existsSync(sourceFile)) {
+		console.warn('[Hotmart AppSec] org-workflow/appsec-guard.yml not found in extension bundle');
+		return;
+	}
+
+	if (!fs.existsSync(targetDir)) {
+		fs.mkdirSync(targetDir, { recursive: true });
+	}
+
+	fs.copyFileSync(sourceFile, targetFile);
+	console.log(`[Hotmart AppSec] Installed appsec-guard.yml at ${targetFile}`);
 }
 
 /**
@@ -2136,131 +2140,6 @@ function getWorkspaceFolder(): string | undefined {
 		return undefined;
 	}
 	return folders[0].uri.fsPath;
-}
-
-// ─── UPDATE CHECK ─────────────────────────────────────────────────────────────
-
-/**
- * Queries the VS Code Marketplace for the latest published version of the extension.
- * If a newer version is available, shows a warning notification encouraging the user
- * to update, emphasizing security fixes and bug corrections.
- *
- * Runs once per activation with a short delay so it doesn't block startup.
- */
-function checkForExtensionUpdate(context: vscode.ExtensionContext): void {
-	const CHECK_INTERVAL_KEY = 'hotmartAppSec.lastUpdateCheck';
-	const ONE_HOUR_MS = 60 * 60 * 1000;
-
-	// Throttle: only check once per hour to avoid excessive network calls
-	const lastCheck = context.globalState.get<number>(CHECK_INTERVAL_KEY, 0);
-	if (Date.now() - lastCheck < ONE_HOUR_MS) {
-		return;
-	}
-
-	// Delay the check so it doesn't slow down activation
-	setTimeout(async () => {
-		try {
-			const currentVersion = (context.extension?.packageJSON?.version as string) || '0.0.0';
-			const latestVersion = await fetchLatestMarketplaceVersion();
-
-			if (!latestVersion) { return; }
-
-			void context.globalState.update(CHECK_INTERVAL_KEY, Date.now());
-
-			if (isNewerVersion(latestVersion, currentVersion)) {
-				const action = await vscode.window.showWarningMessage(
-					`[Hotmart AppSec] 🛡️ Nova versão disponível (v${latestVersion})! ` +
-					`Esta atualização contém correções de bugs e melhorias de segurança importantes. ` +
-					`Atualize agora para manter seu ambiente protegido contra as vulnerabilidades mais recentes.`,
-					'Atualizar Agora',
-					'Depois'
-				);
-
-				if (action === 'Atualizar Agora') {
-					// Opens the extension page in the Extensions view so the user can update
-					await vscode.commands.executeCommand(
-						'workbench.extensions.action.showExtensionsWithIds',
-						['HotmartCybersecurity.cybersecurityextension']
-					);
-				}
-			}
-		} catch (err) {
-			console.error('[Hotmart AppSec] Update check failed:', err);
-		}
-	}, 5000);
-}
-
-/**
- * Fetches the latest version from the VS Code Marketplace API.
- * Uses the public query endpoint to avoid requiring authentication.
- */
-async function fetchLatestMarketplaceVersion(): Promise<string | null> {
-	try {
-		const postData = JSON.stringify({
-			filters: [{
-				criteria: [
-					{ filterType: 7, value: 'HotmartCybersecurity.cybersecurityextension' }
-				]
-			}],
-			flags: 0x1 // IncludeVersions
-		});
-
-		return new Promise<string | null>((resolve) => {
-			const req = https.request({
-				hostname: 'marketplace.visualstudio.com',
-				path: '/_apis/public/gallery/extensionquery',
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Accept': 'application/json;api-version=6.1-preview.1',
-					'Content-Length': Buffer.byteLength(postData),
-				},
-				timeout: 10000,
-			}, (res) => {
-				let data = '';
-				res.on('data', (chunk: string) => { data += chunk; });
-				res.on('end', () => {
-					try {
-						const json = JSON.parse(data);
-						const extensions = json?.results?.[0]?.extensions;
-						if (extensions && extensions.length > 0) {
-							const versions = extensions[0]?.versions;
-							if (versions && versions.length > 0) {
-								resolve(versions[0].version as string);
-								return;
-							}
-						}
-						resolve(null);
-					} catch {
-						resolve(null);
-					}
-				});
-			});
-
-			req.on('error', () => resolve(null));
-			req.on('timeout', () => { req.destroy(); resolve(null); });
-			req.write(postData);
-			req.end();
-		});
-	} catch {
-		return null;
-	}
-}
-
-/**
- * Returns true if `latest` is a newer semver than `current`.
- */
-function isNewerVersion(latest: string, current: string): boolean {
-	const latestParts = latest.split('.').map(Number);
-	const currentParts = current.split('.').map(Number);
-
-	for (let i = 0; i < 3; i++) {
-		const l = latestParts[i] || 0;
-		const c = currentParts[i] || 0;
-		if (l > c) { return true; }
-		if (l < c) { return false; }
-	}
-	return false;
 }
 
 export function deactivate() {

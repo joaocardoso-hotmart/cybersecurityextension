@@ -13,7 +13,6 @@ deploy/**
 dist/**
 scripts/**
 Hotmart Appsec/**
-standards/org-workflow/**
 
 # Spec documentation (not needed in runtime)
 .kiro/**
